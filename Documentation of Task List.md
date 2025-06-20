@@ -1,13 +1,13 @@
-Guide + Documentation of Task List Workflow
+# Guide + Documentation of Task List Workflow
 
 The Task List workflow is at: https://n8n.routeignite.com/workflow/8vF2laRENHdw8HRs
 
-Tech Stack
+## Tech Stack
 Telegram as the front-end
 n8n as the back end and trigger handler
 Supabase postgres as the database
 
-Structure
+## Structure
 
 The workflow is triggered by interacting with the telegram bot.
 
@@ -23,23 +23,23 @@ The state of the table is a JSON. We are using JSON instead of a string so that 
 
 Based on the state, we enter a code node that is the brain of the workflow. It determines which route to take next, what action must be performed, what to tell the user etc.
 Based on the route taken, the workflow uses a switch node and enters flows that contain one of the following:
-   AI Agent that performs actions such as:
-   Parsing user’s input
-   Formatting the output for the user
-   A telegram node to interact with the user - display results, ask for input, issue warnings etc.
-   A postgres node to interact with the database
-   An IF node that further determines which route to take, whether to loop the program back to the code node etc.
-   A loop-over-items node that handles data items in batches.
-   A google sheets node to update the mirror of the database in google sheets.
+- AI Agent that performs actions such as:
+- Parsing user’s input
+- Formatting the output for the user
+- A telegram node to interact with the user - display results, ask for input, issue warnings etc.
+- A postgres node to interact with the database
+- An IF node that further determines which route to take, whether to loop the program back to the code node etc.
+- A loop-over-items node that handles data items in batches.
+- A google sheets node to update the mirror of the database in google sheets.
 
 
 
 
-Database Schema
+## Database Schema
 
 
 
-Session State Values
+## Session State Values
 The naming of state is based on what is happening presently as the workflow is activated.
 
 
@@ -47,11 +47,12 @@ The naming of state is based on what is happening presently as the workflow is a
 
 
 
-Future Scope
+## Future Scope
 
    Edit the code and database to have a better flow of the code. Using more functions. Client List presenting and retrieving can occur whenever needed and this sub-state can be added as a stack and then removed, to resume processing.
    Implementing cute forms to replace certain functionalities shortly.
    Possibly Implementing this is a complete full stack customized app soon - this shall replace the interaction from telegram, and also replace the backend from n8n to something else entirely. - Low priority.
 
-Learnings
+## Learnings
+
    Implement features depth-first rather than breadth-first. This means, don’t build the entire possibilities of workflow from the beginning. Implement one particular route functionality fully so you can identify challenges and then use what you learn.
