@@ -90,11 +90,11 @@ if (workflow_process == true) {
     }
   }
 
-  // 🌸 Flow: Adding a new Task
+  // 🌸 Flow: Add a new Task
   // If it has just started, retrieve the list of clients
-  // Next state: adding_task_retrievedClients
-  if (currState === 'adding_task_started') {
-    const newStateStack = replaceTopState(session, 'adding_task_retrievedClients')
+  // Next state: add_task_retrievedClients
+  if (currState === 'add_task_started') {
+    const newStateStack = replaceTopState(session, 'add_task_retrievedClients')
 
     return [
       {
@@ -109,7 +109,7 @@ if (workflow_process == true) {
       {
         json: {
           route: 'postgresNode',
-          info: 'Updating state from adding_task_started to adding_task_retrievedClients',
+          info: 'Updating state from add_task_started to add_task_retrievedClients',
           query: `
           UPDATE track_session 
           SET state = '${JSON.stringify(newStateStack)}'::jsonb,
@@ -122,11 +122,11 @@ if (workflow_process == true) {
     ]
   }
 
-  // 🌸 Flow: Adding a new Task
+  // 🌸 Flow: Add a new Task
   // If client list has been fetched, prepare list and ask user to select
-  // Next state: adding_task_selectedClient
-  if (currState === 'adding_task_retrievedClients') {
-    const newStateStack = replaceTopState(session, 'adding_task_selectedClient')
+  // Next state: add_task_selectedClient
+  if (currState === 'add_task_retrievedClients') {
+    const newStateStack = replaceTopState(session, 'add_task_selectedClient')
 
     // 🌼 Extract client list from context_data
     const context = $('Updated Session').first().json.context_data
@@ -143,7 +143,7 @@ if (workflow_process == true) {
       {
         json: {
           route: 'postgresNode',
-          info: 'Updating state from adding_task_retrievedClients to adding_task_selectedClient',
+          info: 'Updating state from add_task_retrievedClients to add_task_selectedClient',
           query: `
           UPDATE track_session 
           SET state = '${JSON.stringify(newStateStack)}'::jsonb,
@@ -221,7 +221,7 @@ function replaceTopState(stack, newTop) {
 function getNextStateFromInput(input, currRole) {
   /** @type {{ [key: string]: string }} */
   const mapping = {
-    '➕ Add Task': 'adding_task_started',
+    '➕ Add Task': 'add_task_started',
     '🔍 View Tasks': 'view_tasks_started',
     '✏️Update Task': 'update_task_started',
     '📤 Send Tasks': 'send_tasks_started',
