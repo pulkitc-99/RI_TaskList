@@ -76,7 +76,7 @@ if (workflow_process == true) {
         {
           json: {
             route: 'postgresNode',
-            info: `Updating session to push ${nextState} on the stack`,
+            info: `Updating state to push ${nextState} on the stack`,
             query: `
             UPDATE track_session 
             SET state = '${JSON.stringify(newStateStack)}'::jsonb,
@@ -88,6 +88,79 @@ if (workflow_process == true) {
         },
       ]
     }
+  }
+
+  // 🌸 Flow: Adding a new Task
+  // If it has just started, retrieve the list of clients
+  // Next state: adding_task_retrievedClients
+  if (currState === 'adding_task_started') {
+    const newStateStack = replaceTopState(session, 'adding_task_retrievedClients')
+
+    return [
+      {
+        json: {
+          route: 'postgresNode',
+          info: 'Fetch all clients for this session',
+          query: `UPDATE track_session SET context_data = 
+          (SELECT json_agg(json_build_object('uid', uid, 'name', name)) 
+          FROM clients) WHERE user_id = '${currUserID}';`.trim(),
+        },
+      },
+      {
+        json: {
+          route: 'postgresNode',
+          info: 'Updating state from adding_task_started to adding_task_retrievedClients',
+          query: `
+          UPDATE track_session 
+          SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+              workflow_process = true,
+              last_updated = NOW()
+          WHERE user_id = '${currUserID}';
+        `.trim(),
+        },
+      },
+    ]
+  }
+
+  // 🌸 Flow: Adding a new Task
+  // If client list has been fetched, prepare list and ask user to select
+  // Next state: adding_task_selectedClient
+  if (currState === 'adding_task_retrievedClients') {
+    const newStateStack = replaceTopState(session, 'adding_task_selectedClient')
+
+    // 🌼 Extract client list from context_data
+    const context = $('Updated Session').first().json.context_data
+    const clientList = Array.isArray(context) ? context : []
+
+    // 🌷 Prepare a nicely formatted list of clients
+    const clientText = clientList.map((client) => `🔹 ${client.name} (${client.uid})`).join('\n')
+
+    const message =
+      `🌼 Please choose a client for this task:\n\n${clientText}\n\n👉` +
+      `Reply with the exact *UID* or *client name*.\n🌱 Or type /New to create a new client.`
+
+    return [
+      {
+        json: {
+          route: 'postgresNode',
+          info: 'Updating state from adding_task_retrievedClients to adding_task_selectedClient',
+          query: `
+          UPDATE track_session 
+          SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+              workflow_process = false,
+              last_updated = NOW()
+          WHERE user_id = '${currUserID}';
+        `.trim(),
+        },
+      },
+      {
+        json: {
+          route: 'telegramNode',
+          info: 'Sending list of clients to user and asking for selection',
+          message,
+        },
+      },
+    ]
   }
 
   // 🌙 If no known state matched, return gracefully with no action
@@ -148,7 +221,7 @@ function replaceTopState(stack, newTop) {
 function getNextStateFromInput(input, currRole) {
   /** @type {{ [key: string]: string }} */
   const mapping = {
-    '➕ Add Task': 'adding_new_task_started',
+    '➕ Add Task': 'adding_task_started',
     '🔍 View Tasks': 'view_tasks_started',
     '✏️Update Task': 'update_task_started',
     '📤 Send Tasks': 'send_tasks_started',
