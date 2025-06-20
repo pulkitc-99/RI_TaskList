@@ -50,8 +50,11 @@ The naming of state is based on what is happening presently as the workflow is a
 ## Future Scope
 
    Edit the code and database to have a better flow of the code. Using more functions. Client List presenting and retrieving can occur whenever needed and this sub-state can be added as a stack and then removed, to resume processing.
+
    Implementing cute forms to replace certain functionalities shortly.
    Possibly Implementing this is a complete full stack customized app soon - this shall replace the interaction from telegram, and also replace the backend from n8n to something else entirely. - Low priority.
+
+   Adding Analytics of Task List as well as lovely data visualization with external tools. Workload, client's share of tasks using pie chart and other things.
 
 ## Learnings
 

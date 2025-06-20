@@ -1,0 +1,43 @@
+# Node modules - gopi dependencies
+node_modules/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# VS Code settings
+.vscode/
+
+# Logs and debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables (if any)
+.env
+.env.*
+
+# OS-generated clutter
+*.swp
+*.swo
+
+# Optional: ignore your output/prettified logs
+prettier.log
+eslint-report.txt
+
+# Backup files
+*.bak
+*.tmp
+
+# Optional: ignore generated JSON or SQLite DBs, if created later
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Ignore compiled output (if ever using TypeScript etc.)
+dist/
+build/
+
+
+Common Commands
