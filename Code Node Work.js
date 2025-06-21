@@ -11,7 +11,9 @@ let currState = peekState(session)
 
 if (workflow_process == true) {
   // 🌸 Start of the divine switch and state based routing
-  // 🌸 If a new session has started, greet the user
+
+  // State: new_session
+  // 🌸 If a new session has started, greet the user and ask them what they wish to do
   // Next State: session_started
   if (currState === 'new_session') {
     return [
@@ -36,7 +38,8 @@ if (workflow_process == true) {
     ]
   }
 
-  // 🌼 If user has just started a session, ask them what they wish to do
+  // State: session_started
+  // 🌼 Once the user has selected a command, parse
   if (currState === 'session_started') {
     const nextState = getNextStateFromInput(currInput, currRole)
 
@@ -54,6 +57,7 @@ if (workflow_process == true) {
             route: 'greet',
           },
         },
+        endWorkflowUpdate(currUserID),
       ]
     } else if (nextState === 'unauthorized') {
       return [
@@ -69,6 +73,7 @@ if (workflow_process == true) {
             route: 'greet',
           },
         },
+        endWorkflowUpdate(currUserID),
       ]
     } else {
       const newStateStack = pushState(session, nextState)
@@ -91,6 +96,7 @@ if (workflow_process == true) {
   }
 
   // 🌸 Flow: Add a new Task
+  // State: add_task_started
   // If it has just started, retrieve the list of clients
   // Next state: add_task_retrievedClients
   if (currState === 'add_task_started') {
@@ -101,7 +107,6 @@ if (workflow_process == true) {
         json: {
           route: 'postgresNode',
           info: 'Fetch all clients for this session',
-
           query: `UPDATE track_session
 SET context_data = jsonb_build_object(
   'clients',
@@ -131,6 +136,7 @@ WHERE user_id = '${currUserID}';`.trim(),
   }
 
   // 🌸 Flow: Add a new Task
+  // State: add_task_retrievedClients
   // If client list has been fetched, prepare list and ask user to select
   // Next state: add_task_selectedClient
   if (currState === 'add_task_retrievedClients') {
@@ -142,10 +148,11 @@ WHERE user_id = '${currUserID}';`.trim(),
 
     const clientText = clientList.map((client) => `🔹 ${client.name} (${client.uid})`).join('\n')
 
+    // Prepare message to ask the user to choose a client from the list
     const message =
       `${currUserName},` +
       `🌼 Please choose a client for this task:\n\n${clientText}\n\n👉` +
-      `Reply with the exact *UID* or *client name*.\n🌱 Or type /New to create a new client.`
+      `Reply with the exact *UID* or *client name*.\n🌱 Or type /new to create a new client.`
 
     return [
       {
@@ -172,6 +179,7 @@ WHERE user_id = '${currUserID}';`.trim(),
   }
 
   // 🌸 Flow: Add a new Task
+  // State: add_task_selectedClient
   // Once the user has entered a particular client, we check their validity and proceed accordingly.
   // Next state: add_task_receivedTaskDetails
   if (currState === 'add_task_selectedClient') {
@@ -207,7 +215,7 @@ WHERE user_id = '${currUserID}';`.trim(),
           json: {
             route: 'telegramNode',
             info: 'Client not found — prompting user to try again',
-            message: `⚠️ Hmm, I couldn't find a client by that name or UID. Please try again or type /New to create a new client.`,
+            message: `⚠️ Hmm, I couldn't find a client by that name or UID. Please try again.\n`,
           },
         },
       ]
@@ -215,7 +223,7 @@ WHERE user_id = '${currUserID}';`.trim(),
     const newStateStack = replaceTopState(session, 'add_task_receivedTaskDetails')
 
     // Prepare Message to send to user - asking to enter task details with an example
-    const taskMessage = `📝 Wonderful! Please share the task details in simple *Key:Value* format, like this:
+    const taskMessage = `📝 Wonderful! Please share the task details in simple *Key:Value* format for ${foundClient.name}, like this:
 
 *title*: Follow up with vendor
 *due*: 22-06-2025
@@ -256,8 +264,9 @@ Take your time. I'm right here when you're ready ✨`
   }
 
   // 🌸 Flow: Add a new Task
+  // State: add_task_receivedTaskDetails
   // Once the user has entered the new task's details, we parse and validate them, and proceed accordingly.
-  // Next state: add_task_confirmedTaskDetails
+  // Next state: add_task_verifiedTaskDetails
   if (currState === 'add_task_receivedTaskDetails') {
     const taskText = String(currInput).trim()
     const context = $('Updated Session').first().json.context_data || {}
@@ -320,7 +329,6 @@ Take your time. I'm right here when you're ready ✨`
             message: validation.message,
           },
         },
-        // TODO Inform particular error thruogh helper function and try again.
       ]
     }
 
@@ -366,34 +374,326 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
   }
 
   // 🌸 Flow: Add a new Task
+  // State: add_task_verifiedTaskDetails
   // Once the user's input of new task details are validated, we check the user's confirmation
-  // and add the task into the database
-  // Next state: adding_task_taskAdded
-  // if (currState === 'add_task_verifiedTaskDetails') { }
+  // and then first retrieve all the current tasks' UIDs so that we can generate a unique one
+  // Next state: add_task_retrievedTaskUIDs
+  if (currState === 'add_task_verifiedTaskDetails') {
+    const input = String(currInput).trim().toLowerCase()
 
-  //TODO
+    // If the user says "no" to the task details, then ask for it again
+    if (input === 'no') {
+      const revertStateStack = replaceTopState(session, 'add_task_selectedClient')
+      return [
+        {
+          json: {
+            route: 'postgresNode',
+            info: 'User rejected task details — cleaning up and retrying. State becomes add_task_selectedClient',
+            query: `
+            UPDATE track_session
+            SET context_data = context_data - 'task_details',
+                state = '${JSON.stringify(revertStateStack)}'::jsonb,
+                workflow_process = true,
+                last_updated = NOW()
+            WHERE user_id = '${currUserID}';
+          `.trim(),
+          },
+        },
+        {
+          json: {
+            route: 'telegramNode',
+            message: '🌸 No worries, let’s try again. Please enter the task details once more!\n',
+          },
+        },
+      ]
+    }
+
+    // If the user says "yes" to the task details, then retrieve all current tasks UIDs.
+    else if (input === 'yes') {
+      const newStateStack = replaceTopState(session, 'add_task_retrievedTaskUIDs')
+      return [
+        {
+          json: {
+            route: 'postgresNode',
+            info: 'Fetching existing task UIDs before generating a new one. State becomes add_task_retrievedTaskUIDs',
+            query: `
+            UPDATE track_session
+            SET context_data = jsonb_set(
+              context_data,
+              '{existing_task_uids}',
+              (
+                SELECT jsonb_agg(uid) FROM tasks
+              )
+            ),
+            state = '${JSON.stringify(newStateStack)}'::jsonb,
+            workflow_process = true,
+            last_updated = NOW()
+            WHERE user_id = '${currUserID}';
+          `.trim(),
+          },
+        },
+      ]
+    }
+
+    // If the user replies with anything other than "yes" or "no", tell them to enter again.
+    else
+      return [
+        {
+          json: {
+            route: 'telegramNode',
+            message:
+              'Please only reply with either *yes* to confirm or *no* to re-enter task details.',
+          },
+        },
+      ]
+  }
+
   // 🌸 Flow: Add a new Task
-  // Once the new task is added to the database, inform the user and ask if they want to assign this task
-  // If YES: Next state stack: adding_task_assigningTaskAdded, assign_task
-  // If NO:  Pop the state
+  // State: add_task_retrievedTaskUIDs
+  // Once we have retrieved all the tasks UIDs, generate a unique one and then enter the task
+  // into the database
+  // Next state: add_task_taskAdded
+  if (currState === 'add_task_retrievedTaskUIDs') {
+    const context = $('Updated Session').first().json.context_data || {}
+    const selectedClient = context.selected_client
+    const taskDetails = context.task_details
+    const formattedDueDate = taskDetails.due ? convertToPostgresDate(taskDetails.due) : null
+    const uidList = context.existing_task_uids
 
-  //TODO
+    // Generate Task UID (e.g., T4X2A)
+    const taskUID = generateUID('T', uidList)
+    const newStateStack = replaceTopState(session, 'add_task_taskAdded')
+
+    return [
+      {
+        json: {
+          route: 'postgresNode',
+          info: 'Inserting new task into DB',
+          query: `
+            INSERT INTO tasks (uid, client_uid, title, due_date, priority, status, created_by)
+            VALUES (
+              '${taskUID}',
+              '${selectedClient.uid}',
+              '${taskDetails.title}',
+              ${formattedDueDate ? `'${formattedDueDate}'` : 'NULL'},
+              ${taskDetails.priority ? `'${taskDetails.priority}'` : 'NULL'},
+              ${taskDetails.status ? `'${taskDetails.status}'` : 'NULL'},
+              '${currUserID}'
+            );`.trim(),
+        },
+      },
+      {
+        json: {
+          route: 'postgresNode',
+          info: 'Updating state after task added',
+          query: `
+            UPDATE track_session 
+            SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+                workflow_process = false,
+                last_updated = NOW()
+            WHERE user_id = '${currUserID}';
+          `.trim(),
+        },
+      },
+      {
+        json: {
+          route: 'telegramNode',
+          message: `✅ Task added successfully!\n\n✨ Would you like to assign this task to someone?\n\n🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`,
+        },
+      },
+    ]
+  }
+
   // 🌸 Flow: Add a new Task
-  // This will come when the assign_task above this is popped. Simply pop it as adding task and assigning it is not complete
-  // Next state: session_ongoing
-  // if (currState === 'adding_task_assigningTaskAdded') { }
+  // State: add_task_taskAdded
+  // The task has been added and user was asked whether to assign it
+  // If YES: Next state stack → add_task_assigningTaskAdded, assign_task
+  // If NO: Pop the state and continue gracefully
+  if (currState === 'add_task_taskAdded') {
+    const input = currInput.trim().toLowerCase()
 
-  //TODO
-  // Since no more items are on top, ask if the user wants to do anything
-  // If YES: Next state stack: session_ongoing, <the new action's state>
-  // If NO:  Next state stack: session_ended
-  // if (currState === 'session_ongoing') { }
+    if (input === 'yes') {
+      const newStateStack = pushState(
+        replaceTopState(session, 'add_task_assigningTaskAdded'),
+        'assign_task'
+      )
 
-  //TODO
-  // This comes when the user triggers the workflow via telegram after the last session has ended
-  // Simply start a new session
-  // Next state: new_session
-  // if (currState === 'session_ended') { }
+      return [
+        {
+          json: {
+            route: 'postgresNode',
+            info: 'User agreed to assign task — updating state stack to assign_task',
+            query: `
+            UPDATE track_session
+            SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+                workflow_process = true,
+                last_updated = NOW()
+            WHERE user_id = '${currUserID}';
+          `.trim(),
+          },
+        },
+      ]
+    } else if (input === 'no') {
+      const poppedStateStack = popState(session)
+
+      return [
+        {
+          json: {
+            route: 'postgresNode',
+            info: 'Popping taskAdded state, going back to session_ongoing',
+            query: `
+            UPDATE track_session
+            SET state = '${JSON.stringify(poppedStateStack)}'::jsonb,
+                workflow_process = false,
+                last_updated = NOW()
+            WHERE user_id = '${currUserID}';
+          `.trim(),
+          },
+        },
+      ]
+    }
+
+    // If neither yes nor no, ask again
+    else
+      return [
+        {
+          json: {
+            route: 'telegramNode',
+            message: `🤔 I didn’t catch that. Would you like to assign this task?\n\n🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`,
+          },
+        },
+      ]
+  }
+
+  // 🌸 Flow: Add a new Task
+  // State: add_task_assigningTaskAdded
+  // Assign task step just got popped — now we pop this state too and return to main session
+  if (currState === 'add_task_assigningTaskAdded') {
+    const newStateStack = popState(session)
+
+    return [
+      {
+        json: {
+          route: 'postgresNode',
+          info: 'Task assigned successfully, now returning to session flow',
+          query: `
+          UPDATE track_session
+          SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+              workflow_process = false,
+              last_updated = NOW()
+          WHERE user_id = '${currUserID}';
+        `.trim(),
+        },
+      },
+    ]
+  }
+
+  // 🌸 Flow: Last Intention Ended
+  // State: session_started
+  // Ask the user if they would like to do anything else
+  if (currState === 'session_started') {
+    return [
+      {
+        json: {
+          route: 'telegramNode',
+          message: `🌟 Would you like to do anything else?\n\nTypes *yes* to confirm,\n🚪 Or type *no* to exit.`,
+        },
+      },
+      {
+        json: {
+          route: 'postgresNode',
+          info: `Proceed to next node that checks the user's reply, to do something else or end.`,
+          query: `
+          UPDATE track_session
+          SET state = '["another_session_input"]'::jsonb,
+              workflow_process = false,
+              last_updated = NOW()
+          WHERE user_id = '${currUserID}';
+        `.trim(),
+        },
+      },
+    ]
+  }
+
+  // 🌸 Flow: Ask user if they want to perform another action
+  // State: another_session_input
+  if (currState === 'another_session_input') {
+    if (currInput.toLowerCase() === 'no') {
+      const newStateStack = replaceTopState(session, 'session_ended')
+      return [
+        {
+          json: {
+            route: 'postgresNode',
+            info: 'User chose to end session',
+            query: `
+            UPDATE track_session 
+            SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+                workflow_process = false,
+                last_updated = NOW()
+            WHERE user_id = '${currUserID}';
+          `.trim(),
+          },
+        },
+        {
+          json: {
+            route: 'telegramNode',
+            message: `\n🙏 Thank you for using RI Task List Bot. The session has now ended.`,
+          },
+        },
+      ]
+    } else if (currInput.toLowerCase() === 'yes') {
+      const newStateStack = replaceTopState(session, 'new_session')
+
+      return [
+        {
+          json: {
+            route: 'postgresNode',
+            info: 'User chose to perform another action.',
+            query: `
+            UPDATE track_session 
+            SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+                workflow_process = true,
+                last_updated = NOW()
+            WHERE user_id = '${currUserID}';
+          `.trim(),
+          },
+        },
+      ]
+    }
+
+    // If the user replies with anything other than "yes" or "no", tell them to enter again.
+    else
+      return [
+        {
+          json: {
+            route: 'telegramNode',
+            message:
+              'Please only reply with either *yes* to confirm or *no* to re-enter task details.\n',
+          },
+        },
+      ]
+  }
+
+  // 🌸 Flow: Start a new session since last one ended
+  // State: session_ended
+  if (currState === 'session_ended') {
+    const newStateStack = replaceTopState(session, 'new_session')
+    return [
+      {
+        json: {
+          route: 'postgresNode',
+          info: 'Starting new session from session_ended',
+          query: `
+            UPDATE track_session 
+            SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+                workflow_process = true,
+                last_updated = NOW()
+            WHERE user_id = '${currUserID}';
+          `.trim(),
+        },
+      },
+    ]
+  }
 
   // 🌙 If no known state matched, return gracefully with no action
   return [
@@ -432,10 +732,10 @@ function pushState(stack, newState) {
   return newStack
 }
 
-// function popState(stack) {
-//   if (!Array.isArray(stack) || stack.length === 0) return []
-//   return stack.length > 1 ? stack.slice(0, -1) : stack
-// }
+function popState(stack) {
+  if (!Array.isArray(stack) || stack.length === 0) return []
+  return stack.length > 1 ? stack.slice(0, -1) : stack
+}
 
 function peekState(stack) {
   if (!Array.isArray(stack) || stack.length === 0) return null
@@ -564,4 +864,44 @@ function validateDueDate(dateStr) {
   const hundredYearsFromNow = new Date(now.getFullYear() + 100, 0, 1)
 
   return dueDate >= now && dueDate < hundredYearsFromNow
+}
+
+// Generate a new unique UID with given prefix and list
+function generateUID(prefix, given_uidList) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+
+  let uid
+  do {
+    uid = prefix
+    for (let i = 0; i < 4; i++) {
+      uid += chars.charAt(Math.floor(Math.random() * chars.length))
+    }
+  } while (given_uidList.includes(uid))
+
+  return uid
+}
+
+// This function is used to set the is_processing flag and
+// work_process flag to false when exiting the workflow
+function endWorkflowUpdate(currUserID) {
+  return {
+    json: {
+      route: 'postgresNode',
+      info: `Setting is_processing and workflow_process flag to false as exiting workflow`,
+      query: `
+        UPDATE track_session 
+        SET workflow_process = false,
+            is_processing = false,
+        WHERE user_id = '${currUserID}';
+      `.trim(),
+    },
+  }
+}
+
+// We use this function to convert DD-MM-YY format date to
+// postgres format of YYYY-MM-DD
+function convertToPostgresDate(ddmmyy) {
+  const [dd, mm, yy] = ddmmyy.split('-').map(Number)
+  const yyyy = 2000 + yy // Assuming 20YY; adjust if you're crossing centuries
+  return `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`
 }

@@ -33,7 +33,7 @@ Based on the route taken, the workflow uses a switch node and enters flows that 
 - A google sheets node to update the mirror of the database in google sheets.
 
 
-
+Every time workflow is executed with telegram, manually send a request to postgres node to set flags to false.
 
 ## Database Schema
 
@@ -55,6 +55,8 @@ The naming of state is based on what is happening presently as the workflow is a
    Possibly Implementing this is a complete full stack customized app soon - this shall replace the interaction from telegram, and also replace the backend from n8n to something else entirely. - Low priority.
 
    Adding Analytics of Task List as well as lovely data visualization with external tools. Workload, client's share of tasks using pie chart and other things.
+
+   Change all database commands to parameterized passing and sanitize input to avoid SQL Injections.
 
 ## Learnings
 
