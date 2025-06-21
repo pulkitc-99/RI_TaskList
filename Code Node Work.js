@@ -1,6 +1,6 @@
 // 📦 Extract session & user details
 const session = $('Updated Session').first().json.state
-const workflow_process = $('Updated Session').first().json.workflow_process
+const processing_flag = $('Updated Session').first().json.processing_flag
 const currRole = $('Get User Details').first().json.role
 const currInput = $('Trigger upon receiving telegram message').first().json.message.text
 const currUserID = $('Trigger upon receiving telegram message').first().json.message.from.id
@@ -9,7 +9,7 @@ const currUserName = $('Get User Details').first().json.first_name
 // Extract current state from the state stack
 let currState = peekState(session)
 
-if (workflow_process == true) {
+if (processing_flag == true) {
   // 🌸 Start of the divine switch and state based routing
 
   // State: new_session
@@ -24,8 +24,8 @@ if (workflow_process == true) {
           query: `
             UPDATE track_session 
             SET state = '["session_started"]'::jsonb,
-                is_processing = false,
-                workflow_process = false,
+                context_data = context_data,
+                processing_flag = false,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
@@ -40,7 +40,7 @@ if (workflow_process == true) {
   }
 
   // State: session_started
-  // 🌼 Once the user has selected a command, parse
+  // 🌼 Once the user has selected a command, parse it and proceed accordingly
   if (currState === 'session_started') {
     const nextState = getNextStateFromInput(currInput, currRole)
 
@@ -86,7 +86,8 @@ if (workflow_process == true) {
             query: `
             UPDATE track_session 
             SET state = '${JSON.stringify(newStateStack)}'::jsonb,
-                workflow_process = true,
+                context_data = '{}',
+                processing_flag = true,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
@@ -102,35 +103,24 @@ if (workflow_process == true) {
   // Next state: add_task_retrievedClients
   if (currState === 'add_task_started') {
     const newStateStack = replaceTopState(session, 'add_task_retrievedClients')
-
     return [
       {
         json: {
           route: 'postgresNode',
-          info: 'Fetch all clients for this session',
-          query: `UPDATE track_session
-SET context_data = jsonb_build_object(
-  'clients',
-  (
-    SELECT json_agg(json_build_object('uid', uid, 'name', name))
-    FROM clients
-  )
-),
-last_updated = NOW()
-WHERE user_id = '${currUserID}';`.trim(),
-        },
-      },
-      {
-        json: {
-          route: 'postgresNode',
-          info: 'Updating state from add_task_started to add_task_retrievedClients',
+          info: 'Fetch all clients for this session. States becomes add_task_retrievedClients',
           query: `
-          UPDATE track_session 
-          SET state = '${JSON.stringify(newStateStack)}'::jsonb,
-              workflow_process = true,
-              last_updated = NOW()
-          WHERE user_id = '${currUserID}';
-        `.trim(),
+          UPDATE track_session
+          SET context_data = jsonb_build_object(
+            'clients',
+            (
+              SELECT json_agg(json_build_object('uid', uid, 'name', name))
+              FROM clients
+            )
+          ),
+          state = '${JSON.stringify(newStateStack)}'::jsonb,
+          processing_flag = true,
+          last_updated = NOW()
+          WHERE user_id = '${currUserID}';`.trim(),
         },
       },
     ]
@@ -159,12 +149,11 @@ WHERE user_id = '${currUserID}';`.trim(),
       {
         json: {
           route: 'postgresNode',
-          info: 'Updating state from add_task_retrievedClients to add_task_selectedClient',
+          info: 'The user shall select a client. Updating state from add_task_retrievedClients to add_task_selectedClient',
           query: `
           UPDATE track_session 
           SET state = '${JSON.stringify(newStateStack)}'::jsonb,
-              is_processing = false,
-              workflow_process = false,
+              processing_flag = false,
               last_updated = NOW()
           WHERE user_id = '${currUserID}';
         `.trim(),
@@ -203,11 +192,11 @@ WHERE user_id = '${currUserID}';`.trim(),
         {
           json: {
             route: 'postgresNode',
-            info: 'Updating state back to add_task_retrievedClients due to invalid Client',
+            info: 'Updating state back to add_task_retrievedClients due to invalid client selected.',
             query: `
           UPDATE track_session 
           SET state = '${JSON.stringify(revertStateStack)}'::jsonb,
-              workflow_process = true,
+              processing_flag = true,
               last_updated = NOW()
           WHERE user_id = '${currUserID}';
         `.trim(),
@@ -241,16 +230,16 @@ Take your time. I'm right here when you're ready ✨`
       {
         json: {
           route: 'postgresNode',
-          info: `Storing selected client UID (${foundClient.uid}) in context_data`,
-          query: `UPDATE track_session
+          info: `User will enter task details now. Storing selected client UID (${foundClient.uid}) in context_data`,
+          query: `
+          UPDATE track_session
           SET context_data = jsonb_set(
             context_data,
             '{selected_client}', to_jsonb(json_build_object('uid', '${foundClient.uid}','name', '${foundClient.name}'))
           ),
-          state = '${JSON.stringify(newStateStack)}'::jsonb,
-          is_processing = false,
-          workflow_process = false,
-          last_updated = NOW()
+            state = '${JSON.stringify(newStateStack)}'::jsonb,
+            processing_flag = false,
+            last_updated = NOW()
           WHERE user_id = '${currUserID}';`.trim(),
         },
       },
@@ -289,7 +278,7 @@ Take your time. I'm right here when you're ready ✨`
             query: `
           UPDATE track_session 
           SET state = '${JSON.stringify(revertStateStack)}'::jsonb,
-              workflow_process = true,
+              processing_flag = true,
               last_updated = NOW()
           WHERE user_id = '${currUserID}';
         `.trim(),
@@ -319,7 +308,7 @@ Take your time. I'm right here when you're ready ✨`
             query: `
           UPDATE track_session 
           SET state = '${JSON.stringify(revertStateStack)}'::jsonb,
-              workflow_process = true,
+              processing_flag = true,
               last_updated = NOW()
           WHERE user_id = '${currUserID}';
         `.trim(),
@@ -354,17 +343,19 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
       {
         json: {
           route: 'postgresNode',
-          info: 'Saving parsed task details into context_data. Proceeding to add_task_verifiedDetails',
-          query: `UPDATE track_session
-        SET context_data = jsonb_set(
+          info:
+            'Saving parsed task details into context_data. Asking user if task is okay to be entered.' +
+            'Proceeding to add_task_verifiedDetails',
+          query: `
+          UPDATE track_session
+          SET context_data = jsonb_set(
           context_data,
           '{task_details}', to_jsonb('${JSON.stringify(taskData)}'::json)
-        ),
-        state = '${JSON.stringify(newStateStack)}'::jsonb,
-        is_processing = false,
-        workflow_process = false,
-        last_updated = NOW()
-        WHERE user_id = '${currUserID}';`.trim(),
+          ),
+            state = '${JSON.stringify(newStateStack)}'::jsonb,
+            processing_flag = false,
+            last_updated = NOW()
+          WHERE user_id = '${currUserID}';`.trim(),
         },
       },
       {
@@ -397,7 +388,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             UPDATE track_session
             SET context_data = context_data - 'task_details',
                 state = '${JSON.stringify(revertStateStack)}'::jsonb,
-                workflow_process = true,
+                processing_flag = true,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
@@ -429,9 +420,9 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
                 SELECT jsonb_agg(uid) FROM tasks
               )
             ),
-            state = '${JSON.stringify(newStateStack)}'::jsonb,
-            workflow_process = true,
-            last_updated = NOW()
+              state = '${JSON.stringify(newStateStack)}'::jsonb,
+              processing_flag = true,
+              last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
           },
@@ -455,8 +446,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             info: 'User entered wrong info when asking if task details are correct.',
             query: `
             UPDATE track_session
-            is_processing = false,
-            workflow_process = false,
+            processing_flag = false,
             WHERE user_id = '${currUserID}';
           `.trim(),
           },
@@ -505,8 +495,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
           query: `
             UPDATE track_session 
             SET state = '${JSON.stringify(newStateStack)}'::jsonb,
-                is_processing = false,
-                workflow_process = false,
+                processing_flag = false,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
@@ -543,7 +532,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             query: `
             UPDATE track_session
             SET state = '${JSON.stringify(newStateStack)}'::jsonb,
-                workflow_process = true,
+                processing_flag = true,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
@@ -561,8 +550,8 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             query: `
             UPDATE track_session
             SET state = '${JSON.stringify(poppedStateStack)}'::jsonb,
-                is_processing = false,
-                workflow_process = false,
+                processing_flag = true,
+                context_data = '{}'
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
@@ -587,8 +576,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             query: `
             UPDATE track_session
             SET
-              is_processing = false,
-              workflow_process = false,
+              processing_flag = false,
             WHERE user_id = '${currUserID}';
           `.trim(),
           },
@@ -610,7 +598,8 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
           query: `
           UPDATE track_session
           SET state = '${JSON.stringify(newStateStack)}'::jsonb,
-              workflow_process = true,
+              processing_flag = true,
+              context_data = '{}',
               last_updated = NOW()
           WHERE user_id = '${currUserID}';
         `.trim(),
@@ -637,8 +626,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
           query: `
           UPDATE track_session
           SET state = '["another_session_input"]'::jsonb,
-              is_processing = false,
-              workflow_process = false,
+              processing_flag = false,
               last_updated = NOW()
           WHERE user_id = '${currUserID}';
         `.trim(),
@@ -660,8 +648,8 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             query: `
             UPDATE track_session 
             SET state = '${JSON.stringify(newStateStack)}'::jsonb,
-                is_processing = false,
-                workflow_process = false,
+                processing_flag = false,
+                context_data = '{}',
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
@@ -685,7 +673,9 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             query: `
             UPDATE track_session 
             SET state = '${JSON.stringify(newStateStack)}'::jsonb,
-                workflow_process = true,
+                is_processing = true,
+                processing_flag = true,
+                context_data = '{}',
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
@@ -711,8 +701,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             query: `
             UPDATE track_session 
             SET
-                is_processing = false,
-                workflow_process = false,
+                processing_flag = false,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
@@ -733,7 +722,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
           query: `
             UPDATE track_session 
             SET state = '${JSON.stringify(newStateStack)}'::jsonb,
-                workflow_process = true,
+                processing_flag = true,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
           `.trim(),
@@ -928,17 +917,16 @@ function generateUID(prefix, given_uidList) {
   return uid
 }
 
-// This function is used to set the is_processing flag and
+// This function is used to set the processing flag and
 // work_process flag to false when exiting the workflow
 function endWorkflowUpdate(currUserID) {
   return {
     json: {
       route: 'postgresNode',
-      info: `Setting is_processing and workflow_process flag to false as exiting workflow`,
+      info: `Setting processing_flag flag to false as exiting workflow`,
       query: `
         UPDATE track_session 
-        SET workflow_process = false,
-            is_processing = false,
+        SET processing_flag = false,
         WHERE user_id = '${currUserID}';
       `.trim(),
     },
