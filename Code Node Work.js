@@ -24,6 +24,7 @@ if (workflow_process == true) {
           query: `
             UPDATE track_session 
             SET state = '["session_started"]'::jsonb,
+                is_processing = false,
                 workflow_process = false,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
@@ -162,6 +163,7 @@ WHERE user_id = '${currUserID}';`.trim(),
           query: `
           UPDATE track_session 
           SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+              is_processing = false,
               workflow_process = false,
               last_updated = NOW()
           WHERE user_id = '${currUserID}';
@@ -246,6 +248,7 @@ Take your time. I'm right here when you're ready ✨`
             '{selected_client}', to_jsonb(json_build_object('uid', '${foundClient.uid}','name', '${foundClient.name}'))
           ),
           state = '${JSON.stringify(newStateStack)}'::jsonb,
+          is_processing = false,
           workflow_process = false,
           last_updated = NOW()
           WHERE user_id = '${currUserID}';`.trim(),
@@ -358,6 +361,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
           '{task_details}', to_jsonb('${JSON.stringify(taskData)}'::json)
         ),
         state = '${JSON.stringify(newStateStack)}'::jsonb,
+        is_processing = false,
         workflow_process = false,
         last_updated = NOW()
         WHERE user_id = '${currUserID}';`.trim(),
@@ -445,6 +449,18 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
               'Please only reply with either *yes* to confirm or *no* to re-enter task details.',
           },
         },
+        {
+          json: {
+            route: 'postgresNode',
+            info: 'User entered wrong info when asking if task details are correct.',
+            query: `
+            UPDATE track_session
+            is_processing = false,
+            workflow_process = false,
+            WHERE user_id = '${currUserID}';
+          `.trim(),
+          },
+        },
       ]
   }
 
@@ -489,6 +505,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
           query: `
             UPDATE track_session 
             SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+                is_processing = false,
                 workflow_process = false,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
@@ -544,6 +561,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             query: `
             UPDATE track_session
             SET state = '${JSON.stringify(poppedStateStack)}'::jsonb,
+                is_processing = false,
                 workflow_process = false,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
@@ -562,6 +580,19 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             message: `🤔 I didn’t catch that. Would you like to assign this task?\n\n🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`,
           },
         },
+        {
+          json: {
+            route: 'postgresNode',
+            info: 'User entered wrong input when asking if they want to assign the task. Asking again.',
+            query: `
+            UPDATE track_session
+            SET
+              is_processing = false,
+              workflow_process = false,
+            WHERE user_id = '${currUserID}';
+          `.trim(),
+          },
+        },
       ]
   }
 
@@ -575,11 +606,11 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
       {
         json: {
           route: 'postgresNode',
-          info: 'Task assigned successfully, now returning to session flow',
+          info: 'The new task added was assigned successfully.\n',
           query: `
           UPDATE track_session
           SET state = '${JSON.stringify(newStateStack)}'::jsonb,
-              workflow_process = false,
+              workflow_process = true,
               last_updated = NOW()
           WHERE user_id = '${currUserID}';
         `.trim(),
@@ -606,6 +637,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
           query: `
           UPDATE track_session
           SET state = '["another_session_input"]'::jsonb,
+              is_processing = false,
               workflow_process = false,
               last_updated = NOW()
           WHERE user_id = '${currUserID}';
@@ -628,6 +660,7 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             query: `
             UPDATE track_session 
             SET state = '${JSON.stringify(newStateStack)}'::jsonb,
+                is_processing = false,
                 workflow_process = false,
                 last_updated = NOW()
             WHERE user_id = '${currUserID}';
@@ -669,6 +702,20 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             route: 'telegramNode',
             message:
               'Please only reply with either *yes* to confirm or *no* to re-enter task details.\n',
+          },
+        },
+        {
+          json: {
+            route: 'postgresNode',
+            info: 'User chose to perform another action.',
+            query: `
+            UPDATE track_session 
+            SET
+                is_processing = false,
+                workflow_process = false,
+                last_updated = NOW()
+            WHERE user_id = '${currUserID}';
+          `.trim(),
           },
         },
       ]
