@@ -1,10 +1,11 @@
-// 📦 Extract session & user details
+// 📦 Extract commonly used session & user details
 const session = $('Updated Session').first().json.state
+const context = $('Updated Session').first().json.context_data || {}
 const processing_flag = $('Updated Session').first().json.processing_flag
-const currRole = $('Get User Details').first().json.role
 const currInput = $('Trigger upon receiving telegram message').first().json.message.text
 const currUserID = $('Trigger upon receiving telegram message').first().json.message.from.id
 const currUserName = $('Get User Details').first().json.first_name
+const currRole = $('Get User Details').first().json.role
 
 // Extract current state from the state stack
 let currState = peekState(session)
@@ -13,163 +14,128 @@ if (processing_flag == true) {
   // 🌸 Start of the divine switch and state based routing
 
   // State: new_session
-  // 🌸 If a new session has started, greet the user and ask them what they wish to do
+  // 🌸 If a new session has started, greet the user and ask them what they wish to do.
   // Next State: session_started
   if (currState === 'new_session') {
     const newStateStack = replaceTopState(session, 'session_started')
     return [
       {
         json: {
-          route: 'postgresNode',
-          info: 'change state from new_session to session_started',
-          query: `
-            UPDATE track_session 
-            SET 
-              state = '${JSON.stringify(newStateStack)}'::jsonb,
-              context_data = context_data,
-              processing_flag = false,
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
+          route: 'greetNode',
         },
       },
-      {
-        json: {
-          route: 'greet',
-        },
-      },
+      updateSessionQuery(
+        'change state from new_session to session_started',
+        newStateStack,
+        context,
+        false
+      ),
     ]
   }
 
   // State: session_started
   // 🌼 Once the user has selected a command, parse it and proceed accordingly
+  // Next State Stack: session_ongoing, <interpreted from command>
   if (currState === 'session_started') {
     const nextState = getNextStateFromInput(currInput, currRole)
     if (nextState === 'invalid') {
+      const newStateStack = replaceTopState(session, 'new_session')
       return [
         {
           json: {
-            route: 'telegramNode',
-            info: `Informing user of invalid command`,
-            message: `Hmm... I couldnt understand what you want. Please choose from the options provided. Let's try again.`,
+            route: 'greetNode',
           },
         },
-        {
-          json: {
-            route: 'greet',
-          },
-        },
-        endWorkflowUpdate(currUserID),
+        telegramMessage(
+          `Informing user of invalid command`,
+          `Hmm... I couldnt understand what you want. Please choose from the options provided. Let's try again.`
+        ),
+        updateSessionQuery(
+          'revert from session_started back to new_session because of invalid command',
+          newStateStack,
+          context,
+          false
+        ),
       ]
     } else if (nextState === 'unauthorized') {
+      const newStateStack = replaceTopState(session, 'new_session')
       return [
         {
           json: {
-            route: 'telegramNode',
-            info: `Informing user of they are not authorized`,
-            message: `Hmm... it seems you are not authorized to do that. Please choose from the options provided. Let's try again.`,
+            route: 'greetNode',
           },
         },
-        {
-          json: {
-            route: 'greet',
-          },
-        },
-        endWorkflowUpdate(currUserID),
+        telegramMessage(
+          `Informing user of they are not authorized`,
+          `Hmm... it seems you are not authorized to do that. Please choose from the options provided. Let's try again.`
+        ),
+        updateSessionQuery(
+          'revert from session_started back to new_session because of invalid command',
+          newStateStack,
+          `context::jsonb`,
+          false
+        ),
       ]
     } else {
       const newStateStack = pushState(replaceTopState(session, 'session_ongoing'), nextState)
       return [
-        {
-          json: {
-            route: 'postgresNode',
-            info: `Updating state to push ${nextState} on the stack`,
-            query: `
-            UPDATE track_session 
-            SET 
-              state = '${JSON.stringify(newStateStack)}'::jsonb,
-              context_data = '{}',
-              processing_flag = true,
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-          },
-        },
+        updateSessionQuery(
+          `Updating state to push ${nextState} on the stack`,
+          newStateStack,
+          context,
+          true
+        ),
       ]
     }
   }
 
   // 🌸 Flow: Add a new Task
   // State: add_task_started
-  // If it has just started, retrieve the list of clients
+  // If it has just started, retrieve the list of clients by calling the subflow
   // Next state: add_task_retrievedClients
   if (currState === 'add_task_started') {
-    const newStateStack = replaceTopState(session, 'add_task_retrievedClients')
+    const newStateStack = pushState(
+      replaceTopState(session, 'add_task_retrievedClients'),
+      'fetch_clientList'
+    )
     return [
-      {
-        json: {
-          route: 'postgresNode',
-          info: 'Fetch all clients for this session. States becomes add_task_retrievedClients',
-          query: `
-          UPDATE track_session
-          SET
-            state = '${JSON.stringify(newStateStack)}'::jsonb,
-            context_data = jsonb_build_object(
-              'clients',
-              (
-                SELECT json_agg(json_build_object('uid', uid, 'name', name))
-                FROM clients
-              )
-              ),
-            processing_flag = true,
-            last_updated = NOW()
-          WHERE user_id = '${currUserID}';`.trim(),
-        },
-      },
+      updateSessionQuery(
+        `Fetching clients for adding task by pushing fetch_clientList on stack`,
+        newStateStack,
+        `jsonb_set(context_data, '{add_task}', '{}'::jsonb, true)`,
+        true
+      ),
     ]
   }
 
   // 🌸 Flow: Add a new Task
   // State: add_task_retrievedClients
-  // If client list has been fetched, prepare list and ask user to select
+  // Once the client list has been fetched, prepare list and ask user to select one
   // Next state: add_task_selectedClient
   if (currState === 'add_task_retrievedClients') {
     const newStateStack = replaceTopState(session, 'add_task_selectedClient')
 
     // 🌼 Extract client list from context_data
-    const context = $('Updated Session').first().json.context_data || {}
-    const clientList = Array.isArray(context.clients) ? context.clients : []
+    const clientList = Array.isArray(context.add_task.client_list)
+      ? context.add_task.client_list
+      : []
 
-    const clientText = clientList.map((client) => `🔹 ${client.name} (${client.uid})`).join('\n')
+    const clientText = clientList.map((client) => `🪔 ${client.name} (${client.uid})`).join('\n')
 
     // Prepare message to ask the user to choose a client from the list
     const message =
-      `${currUserName},` +
-      `🌼 Please choose a client for this task:\n\n${clientText}\n\n👉` +
+      `🌷 ${currUserName},\n` +
+      `Please choose a client for this task:\n\n${clientText}\n\n👉` +
       `Reply with the exact *UID* or *client name*.\n🌱 Or type /new to create a new client.`
 
     return [
-      {
-        json: {
-          route: 'postgresNode',
-          info: 'The user shall select a client. Updating state from add_task_retrievedClients to add_task_selectedClient',
-          query: `
-          UPDATE track_session 
-          SET 
-            state = '${JSON.stringify(newStateStack)}'::jsonb,
-            processing_flag = false,
-            last_updated = NOW()
-          WHERE user_id = '${currUserID}';
-        `.trim(),
-        },
-      },
-      {
-        json: {
-          route: 'telegramNode',
-          info: 'Sending list of clients to user and asking for selection',
-          message,
-        },
-      },
+      telegramMessage('Sending list of clients to user and asking for selection', message),
+      updateSessionQuery(
+        `Client List fetched. The user shall select a client. Updating state from add_task_retrievedClients to add_task_selectedClient`,
+        newStateStack,
+        context,
+        false
+      ),
     ]
   }
 
@@ -178,8 +144,12 @@ if (processing_flag == true) {
   // Once the user has entered a particular client, we check their validity and proceed accordingly.
   // Next state: add_task_receivedTaskDetails
   if (currState === 'add_task_selectedClient') {
-    const context = $('Updated Session').first().json.context_data || {}
-    const clientList = Array.isArray(context.clients) ? context.clients : []
+    // TODO - adding a new client flow is pushed on top if input is /new
+
+    // Fetch client list and check whether entered client exists in the database
+    const clientList = Array.isArray(context.add_task.client_list)
+      ? context.add_task.client_list
+      : []
 
     const clientInput = String(currInput).trim()
 
@@ -193,71 +163,44 @@ if (processing_flag == true) {
     if (!foundClient) {
       const revertStateStack = replaceTopState(session, 'add_task_retrievedClients')
       return [
-        {
-          json: {
-            route: 'postgresNode',
-            info: 'Updating state back to add_task_retrievedClients due to invalid client selected.',
-            query: `
-          UPDATE track_session 
-          SET 
-            state = '${JSON.stringify(revertStateStack)}'::jsonb,
-            processing_flag = true,
-            last_updated = NOW()
-          WHERE user_id = '${currUserID}';
-        `.trim(),
-          },
-        },
-        {
-          json: {
-            route: 'telegramNode',
-            info: 'Client not found — prompting user to try again',
-            message: `⚠️ Hmm, I couldn't find a client by that name or UID. Please try again.\n`,
-          },
-        },
+        telegramMessage(
+          'Client not found — prompting user to try again',
+          `⚠️ Hmm, I couldn't find a client by that name or UID. Please try again.\n`
+        ),
+        updateSessionQuery(
+          'Reverting state from add_task_selectedClient to add_task_retrievedClients due to invalid client selected.',
+          revertStateStack,
+          context,
+          true
+        ),
       ]
     }
+
+    // If client is found, then proceed to ask task details
     const newStateStack = replaceTopState(session, 'add_task_receivedTaskDetails')
 
     // Prepare Message to send to user - asking to enter task details with an example
-    const taskMessage = `📝 Wonderful! Please share the task details in simple *Key:Value* format for ${foundClient.name}, like this:
-
-*title*: Follow up with vendor
-*due*: 22-06-2025
-*priority*: High
-*status*: Not Started
-
-🌼 Only *title* is required — the rest are optional and can be edited anytime.
-
-Take your time. I'm right here when you're ready ✨`
+    const taskMessage =
+      `📝 Wonderful! Please share the task details in simple *Key:Value* format for ${foundClient.name}, like this:\n` +
+      `*title*: Follow up with vendor\n` +
+      `*due*: 22-06-2025\n` +
+      `*priority*: High\n` +
+      `*status*: Not Started\n\n` +
+      `🌼 Only *title* is required — the rest are optional and can be edited anytime.\n\n` +
+      `Take your time. I'm right here when you're ready ✨`
 
     // Store the client's name and UID in context_data
     return [
-      {
-        json: {
-          route: 'postgresNode',
-          info: `User will enter task details now. Storing selected client UID (${foundClient.uid}) in context_data`,
-          query: `
-          UPDATE track_session
-          SET 
-            context_data = jsonb_set(
+      telegramMessage('Asking user for task details', taskMessage),
+      updateSessionQuery(
+        `User will enter task details now. Storing selected client UID (${foundClient.uid}) in context_data`,
+        newStateStack,
+        `jsonb_set(
             context_data,
-            '{selected_client}', to_jsonb(json_build_object('uid', '${foundClient.uid}','name', '${foundClient.name}'))
-          ),
-            state = '${JSON.stringify(newStateStack)}'::jsonb,
-            processing_flag = false,
-            last_updated = NOW()
-          WHERE user_id = '${currUserID}';`.trim(),
-        },
-      },
-
-      // Ask the user to enter details of the task
-      {
-        json: {
-          route: 'telegramNode',
-          info: 'Asking user for task details',
-          message: taskMessage,
-        },
-      },
+            '{add_task, selected_client}', to_jsonb(json_build_object('uid', '${foundClient.uid}','name', '${foundClient.name}'))
+          ),`,
+        false
+      ),
     ]
   }
 
@@ -267,8 +210,7 @@ Take your time. I'm right here when you're ready ✨`
   // Next state: add_task_verifiedTaskDetails
   if (currState === 'add_task_receivedTaskDetails') {
     const taskText = String(currInput).trim()
-    const context = $('Updated Session').first().json.context_data || {}
-    const selectedClient = context.selected_client || {}
+    const selectedClient = context.add_task.selectedClient || {}
 
     // 🌿 Parse key:value input using helper function
     const parsedResult = parseTaskDetails(taskText)
@@ -277,26 +219,8 @@ Take your time. I'm right here when you're ready ✨`
     if (!parsedResult.success) {
       const revertStateStack = replaceTopState(session, 'add_task_selectedClient')
       return [
-        {
-          json: {
-            route: 'postgresNode',
-            info: parsedResult.info,
-            query: `
-          UPDATE track_session 
-          SET 
-            state = '${JSON.stringify(revertStateStack)}'::jsonb,
-            processing_flag = true,
-            last_updated = NOW()
-          WHERE user_id = '${currUserID}';
-        `.trim(),
-          },
-        },
-        {
-          json: {
-            route: 'telegramNode',
-            message: parsedResult.message,
-          },
-        },
+        telegramMessage(parsedResult.info, parsedResult.message),
+        updateSessionQuery(parsedResult.info, revertStateStack, context, true),
       ]
     }
 
@@ -308,72 +232,36 @@ Take your time. I'm right here when you're ready ✨`
       const revertStateStack = replaceTopState(session, 'add_task_selectedClient')
 
       return [
-        {
-          json: {
-            route: 'postgresNode',
-            info: validation.info,
-            query: `
-          UPDATE track_session 
-          SET 
-            state = '${JSON.stringify(revertStateStack)}'::jsonb,
-            processing_flag = true,
-            last_updated = NOW()
-          WHERE user_id = '${currUserID}';
-        `.trim(),
-          },
-        },
-
-        {
-          json: {
-            route: 'telegramNode',
-            message: validation.message,
-          },
-        },
+        telegramMessage(validation.info, validation.message),
+        updateSessionQuery(validation.info, revertStateStack, context, true),
       ]
     }
 
     const newStateStack = replaceTopState(session, 'add_task_verifiedTaskDetails')
 
     // Prepare message to send to user about confirming whether the task looks good.
-    const formattedMessage = `🧑‍💼 ${selectedClient.name} [${selectedClient.uid}]
-
-📝 ${taskData.title}
-
-${taskData.due ? `📅 ${taskData.due}` : ''}
-${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.priority}` : ''}${taskData.status ? ` | ⏳ ${taskData.status}` : ''}` : ''}
-
-👥 —
-
-✅ If this looks good, reply *yes* to confirm.  
-🚫 Or reply *no* to try again.`
+    const formattedMessage =
+      `🧑‍💼 ${selectedClient.name} [${selectedClient.uid}]\n\n` +
+      `📝 ${taskData.title}\n` +
+      `${taskData.due ? `📅 ${taskData.due}\n` : ''}` +
+      `${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.priority}` : ''}${taskData.status ? ` | ⏳ ${taskData.status}` : ''}` : ''}\n` +
+      `👥 —\n` +
+      `✅ If this looks good, reply *yes* to confirm.\n` +
+      `🚫 Or reply *no* to enter task details again.`
 
     return [
-      {
-        json: {
-          route: 'postgresNode',
-          info:
-            'Saving parsed task details into context_data. Asking user if task is okay to be entered.' +
-            'Proceeding to add_task_verifiedDetails',
-          query: `
-          UPDATE track_session
-          SET 
-            context_data = jsonb_set(
+      telegramMessage(
+        'Confirming task details with user (yes/no) in formatted client card style',
+        formattedMessage
+      ),
+      updateSessionQuery(
+        'Saving parsed task details into context_data. Asking user if task is okay to be entered, and proceeding to add_task_verifiedDetails',
+        newStateStack,
+        `jsonb_set(
           context_data,
-          '{task_details}', to_jsonb('${JSON.stringify(taskData)}'::json)
-          ),
-            state = '${JSON.stringify(newStateStack)}'::jsonb,
-            processing_flag = false,
-            last_updated = NOW()
-          WHERE user_id = '${currUserID}';`.trim(),
-        },
-      },
-      {
-        json: {
-          route: 'telegramNode',
-          info: 'Confirming task details with user (yes/no) in formatted client card style',
-          message: formattedMessage,
-        },
-      },
+          '{add_task, task_details}', to_jsonb('${JSON.stringify(taskData)}'::json`,
+        false
+      ),
     ]
   }
 
@@ -389,80 +277,48 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
     if (input === 'no') {
       const revertStateStack = replaceTopState(session, 'add_task_selectedClient')
       return [
-        {
-          json: {
-            route: 'postgresNode',
-            info: 'User rejected task details — cleaning up and retrying. State becomes add_task_selectedClient',
-            query: `
-            UPDATE track_session
-            SET 
-              context_data = context_data - 'task_details',
-              state = '${JSON.stringify(revertStateStack)}'::jsonb,
-              processing_flag = true,
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-          },
-        },
-        {
-          json: {
-            route: 'telegramNode',
-            message: '🌸 No worries, let’s try again. Please enter the task details once more!\n',
-          },
-        },
+        telegramMessage(
+          'Reverting back from add_task_verifiedTaskDetails to add_task_selectedClient since user said task details are not correct.',
+          '🌸 No worries, let’s try again. Please enter the task details once more!\n'
+        ),
+        updateSessionQuery(
+          'User rejected task details — cleaning up and retrying. State becomes add_task_selectedClient',
+          revertStateStack,
+          context - 'add_task.task_details',
+          true
+        ),
       ]
     }
 
     // If the user says "yes" to the task details, then retrieve all current tasks UIDs.
     else if (input === 'yes') {
-      const newStateStack = replaceTopState(session, 'add_task_retrievedTaskUIDs')
+      const newStateStack = pushState(
+        replaceTopState(session, 'add_task_retrievedTaskUIDs'),
+        'fetch_taskUIDs'
+      )
       return [
-        {
-          json: {
-            route: 'postgresNode',
-            info: 'Fetching existing task UIDs before generating a new one. State becomes add_task_retrievedTaskUIDs',
-            query: `
-            UPDATE track_session
-            SET 
-              context_data = jsonb_set(
-              context_data,
-              '{existing_task_uids}',
-              (
-                SELECT jsonb_agg(uid) FROM tasks
-              )
-            ),
-              state = '${JSON.stringify(newStateStack)}'::jsonb,
-              processing_flag = true,
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-          },
-        },
+        updateSessionQuery(
+          'Fetching existing task UIDs before generating a new one. State becomes add_task_retrievedTaskUIDs, fetch_taskUIDs',
+          newStateStack,
+          context,
+          true
+        ),
       ]
     }
 
     // If the user replies with anything other than "yes" or "no", tell them to enter again.
     else
       return [
-        {
-          json: {
-            route: 'telegramNode',
-            message:
-              'Please only reply with either *yes* to confirm or *no* to re-enter task details.',
-          },
-        },
-        {
-          json: {
-            route: 'postgresNode',
-            info: 'User entered wrong info when asking if task details are correct.',
-            query: `
-            UPDATE track_session
-            SET
-              processing_flag = false,
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-          },
-        },
+        telegramMessage(
+          'User entered wrong input when asking if task details are correct.',
+          'Please only reply with either *yes* to confirm or *no* to re-enter task details.'
+        ),
+        updateSessionQuery(
+          'User entered wrong input when asking if task details are correct.',
+          session,
+          context,
+          false
+        ),
       ]
   }
 
@@ -472,21 +328,20 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
   // into the database
   // Next state: add_task_taskAdded
   if (currState === 'add_task_retrievedTaskUIDs') {
-    const context = $('Updated Session').first().json.context_data || {}
-    const selectedClient = context.selected_client
-    const taskDetails = context.task_details
+    const selectedClient = context.add_task.selected_client
+    const taskDetails = context.add_task.task_details
     const formattedDueDate = taskDetails.due ? convertToPostgresDate(taskDetails.due) : null
-    const uidList = context.existing_task_uids
+    const tasksUIDList = context.add_task.task_list.map((task) => task.uid)
 
     // Generate Task UID (e.g., T4X2A)
-    const taskUID = generateUID('T', uidList)
+    const taskUID = generateUID('T', tasksUIDList)
     const newStateStack = replaceTopState(session, 'add_task_taskAdded')
 
     return [
       {
         json: {
           route: 'postgresNode',
-          info: 'Inserting new task into DB',
+          info: 'Inserting new task into DB table tasks',
           query: `
             INSERT INTO tasks (uid, client_uid, title, due_date, priority, status, created_by)
             VALUES (
@@ -500,127 +355,80 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
             );`.trim(),
         },
       },
-      {
-        json: {
-          route: 'postgresNode',
-          info: 'Updating state after task added',
-          query: `
-            UPDATE track_session 
-            SET 
-              state = '${JSON.stringify(newStateStack)}'::jsonb,
-              processing_flag = false,
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-        },
-      },
-      {
-        json: {
-          route: 'telegramNode',
-          message: `✅ Task added successfully!\n\n✨ Would you like to assign this task to someone?\n\n🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`,
-        },
-      },
+      telegramMessage(
+        'Asking user if they want to assign newly added task',
+        `✅ Task added successfully!\n\n✨ Would you like to assign this task to someone?\n\n🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`
+      ),
+      updateSessionQuery(`Updating state after task added`, newStateStack, context, false),
     ]
   }
 
   // 🌸 Flow: Add a new Task
   // State: add_task_taskAdded
   // The task has been added and user was asked whether to assign it
-  // If YES: Next state stack → add_task_assigningTaskAdded, assign_task
+  // If YES: Next state stack → add_task_assignedTaskAdded, assign_task
   // If NO: Pop the state and continue gracefully
   if (currState === 'add_task_taskAdded') {
     const input = currInput.trim().toLowerCase()
 
     if (input === 'yes') {
       const newStateStack = pushState(
-        replaceTopState(session, 'add_task_assigningTaskAdded'),
+        replaceTopState(session, 'add_task_assignedTaskAdded'),
         'assign_task'
       )
-
       return [
-        {
-          json: {
-            route: 'postgresNode',
-            info: 'User agreed to assign task — updating state stack to assign_task',
-            query: `
-            UPDATE track_session
-            SET 
-              state = '${JSON.stringify(newStateStack)}'::jsonb,
-              processing_flag = true,
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-          },
-        },
+        updateSessionQuery(
+          'User agreed to assign task — updating state stack to assign_task',
+          newStateStack,
+          context,
+          true
+        ),
       ]
     } else if (input === 'no') {
       const poppedStateStack = popState(session)
 
       return [
-        {
-          json: {
-            route: 'postgresNode',
-            info: 'Popping taskAdded state, going back to session_ongoing',
-            query: `
-            UPDATE track_session
-            SET 
-              state = '${JSON.stringify(poppedStateStack)}'::jsonb,
-              processing_flag = true,
-              context_data = '{}'
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-          },
-        },
+        updateSessionQuery(
+          'Popping taskAdded state, going back to session_ongoing',
+          poppedStateStack,
+          '{}',
+          true
+        ),
+        telegramMessage(
+          'inform user that task is added and go to menu',
+          '✅The new task added was added successfully 🎈'
+        ),
       ]
     }
 
     // If neither yes nor no, ask again
     else
       return [
-        {
-          json: {
-            route: 'telegramNode',
-            message: `🤔 I didn’t catch that. Would you like to assign this task?\n\n🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`,
-          },
-        },
-        {
-          json: {
-            route: 'postgresNode',
-            info: 'User entered wrong input when asking if they want to assign the task. Asking again.',
-            query: `
-            UPDATE track_session
-            SET
-              processing_flag = false,
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-          },
-        },
+        telegramMessage(
+          'User entered wrong input when asking if they want to assign the task. Asking again.',
+          '🤔 I didn’t catch that. Would you like to assign this task?\n\n🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.'
+        ),
+        updateSessionQuery(
+          'User entered wrong input when asking if they want to assign the task. Asking again.',
+          session,
+          context,
+          false
+        ),
       ]
   }
 
   // 🌸 Flow: Add a new Task
-  // State: add_task_assigningTaskAdded
+  // State: add_task_assignedTaskAdded
   // Assign task step just got popped — now we pop this state too and return to main session
-  if (currState === 'add_task_assigningTaskAdded') {
+  if (currState === 'add_task_assignedTaskAdded') {
     const newStateStack = popState(session)
-
     return [
-      {
-        json: {
-          route: 'postgresNode',
-          info: 'The new task added was assigned successfully.\n',
-          query: `
-          UPDATE track_session
-          SET 
-            state = '${JSON.stringify(newStateStack)}'::jsonb,
-            processing_flag = true,
-            context_data = '{}',
-            last_updated = NOW()
-          WHERE user_id = '${currUserID}';
-        `.trim(),
-        },
-      },
+      updateSessionQuery(
+        'The new task added was assigned successfully, now popping back to session_ongoing.\n',
+        newStateStack,
+        '{}',
+        true
+      ),
     ]
   }
 
@@ -629,28 +437,17 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
   // Ask the user if they would like to do anything else
   if (currState === 'session_ongoing') {
     const newStateStack = replaceTopState(session, 'another_session_input')
-    
     return [
-      {
-        json: {
-          route: 'telegramNode',
-          message: `🌟 Would you like to do anything else?\n\nTypes *yes* to confirm,\n🚪 Or type *no* to exit.`,
-        },
-      },
-      {
-        json: {
-          route: 'postgresNode',
-          info: `Proceed to next node that checks the user's reply, to do something else or end.`,
-          query: `
-          UPDATE track_session
-          SET 
-            state = '${JSON.stringify(newStateStack)}'::jsonb,,
-            processing_flag = false,
-            last_updated = NOW()
-          WHERE user_id = '${currUserID}';
-        `.trim(),
-        },
-      },
+      telegramMessage(
+        'last session ended so asking for further actions',
+        '🌟 Would you like to do anything else?\n\nTypes *yes* to confirm,\n🚪 Or type *no* to exit.'
+      ),
+      updateSessionQuery(
+        `Proceed to next node that checks the user's reply, to do something else or end.`,
+        newStateStack,
+        context,
+        false
+      ),
     ]
   }
 
@@ -660,73 +457,28 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
     if (currInput.toLowerCase() === 'no') {
       const newStateStack = replaceTopState(session, 'session_ended')
       return [
-        {
-          json: {
-            route: 'postgresNode',
-            info: 'User chose to end session',
-            query: `
-            UPDATE track_session 
-            SET 
-              state = '${JSON.stringify(newStateStack)}'::jsonb,
-              processing_flag = false,
-              context_data = '{}',
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-          },
-        },
-        {
-          json: {
-            route: 'telegramNode',
-            message: `\n🙏 Thank you for using RI Task List Bot. The session has now ended.`,
-          },
-        },
+        updateSessionQuery('User chose to end session', newStateStack, context, false),
+        telegramMessage(
+          'User chose to end session',
+          '🙏 Thank you for using RI Task List Bot.\nThe session has now ended.'
+        ),
       ]
     } else if (currInput.toLowerCase() === 'yes') {
       const newStateStack = replaceTopState(session, 'new_session')
 
       return [
-        {
-          json: {
-            route: 'postgresNode',
-            info: 'User chose to perform another action.',
-            query: `
-            UPDATE track_session 
-            SET 
-              state = '${JSON.stringify(newStateStack)}'::jsonb,
-              processing_flag = true,
-              context_data = '{}',
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-          },
-        },
+        updateSessionQuery('User chose to perform another action.', newStateStack, context, true),
       ]
     }
 
     // If the user replies with anything other than "yes" or "no", tell them to enter again.
     else
       return [
-        {
-          json: {
-            route: 'telegramNode',
-            message:
-              'Please only reply with either *yes* to confirm or *no* to re-enter task details.\n',
-          },
-        },
-        {
-          json: {
-            route: 'postgresNode',
-            info: 'User chose to perform another action.',
-            query: `
-            UPDATE track_session 
-            SET
-              processing_flag = false,
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-          },
-        },
+        telegramMessage(
+          'User gave invalid input when asked if they want to do something else',
+          'Please only reply with either *yes* to continue or *no* to exit.'
+        ),
+        updateSessionQuery('User chose to perform another action.', session, context, false),
       ]
   }
 
@@ -735,20 +487,73 @@ ${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.
   if (currState === 'session_ended') {
     const newStateStack = replaceTopState(session, 'new_session')
     return [
-      {
-        json: {
-          route: 'postgresNode',
-          info: 'Starting new session from session_ended',
-          query: `
-            UPDATE track_session 
-            SET 
-              state = '${JSON.stringify(newStateStack)}'::jsonb,
-              processing_flag = true,
-              last_updated = NOW()
-            WHERE user_id = '${currUserID}';
-          `.trim(),
-        },
-      },
+      updateSessionQuery('Starting new session from session_ended', newStateStack, context, true),
+    ]
+  }
+
+  // 🌸 Subflow: fetching all clients details from the database
+  // State: fetch_clientList
+  // Pop the stack after this is complete
+  if (currState === 'fetch_clientList') {
+    const newStateStack = popState(session)
+    let caller = null
+
+    // Check who the caller was based on the below state on the stack
+    let tempStack = [...session] // Safe clone
+    tempStack = popState(tempStack)
+    if (peekState(tempStack) === 'add_task_retrievedClients') {
+      caller = 'add_task'
+    }
+    return [
+      updateSessionQuery(
+        `Fetching clients for adding task by retrieving the data and placing in context_data`,
+        newStateStack,
+        `jsonb_set(
+          context_data,
+          '{${caller},client_list}',
+          to_jsonb( (SELECT json_agg(json_build_object('uid', uid, 'name', name)) FROM clients) ),
+          true
+        )`,
+        true
+      ),
+    ]
+  }
+
+  // 🌸 Subflow: fetching all tasks details from the database
+  // State: fetch_tasks
+  // Pop the stack after this is complete
+  if (currState === 'fetch_tasks') {
+    const newStateStack = popState(session)
+    let caller = null
+
+    // Check who the caller was based on the below state on the stack
+    let tempStack = [...session] // Safe clone
+    tempStack = popState(tempStack)
+    if (peekState(tempStack) === 'add_task_retrievedTaskUIDs') {
+      caller = 'add_task'
+    }
+    return [
+      updateSessionQuery(
+        `Fetching tasks and placing in context_data for caller '${caller}'`,
+        newStateStack,
+        `jsonb_set(context_data,
+        '{${caller},task_list}',
+        to_jsonb((
+          SELECT json_agg(
+            json_build_object(
+              'uid', uid,
+              'title', title,
+              'client_uid', client_uid,
+              'priority', priority,
+              'due_date', due_date,
+              'created_by', created_by,
+              'status', status,
+              'created_at', created_at
+            )
+          ) FROM tasks
+        )`,
+        true
+      ),
     ]
   }
 
@@ -820,7 +625,7 @@ function getNextStateFromInput(input, currRole) {
     '🗂️ Backup': 'backup_started',
     '⚙️ Other': 'other_started',
     '🔍 View My Tasks': 'view_my_tasks_started',
-    '✏️Update Task Assignment Status': 'update_assignment_status_started',
+    '✏️Mark Assignment as Complete': 'mark_assignment_as_complete_started',
   }
 
   const key = String(input)
@@ -830,7 +635,7 @@ function getNextStateFromInput(input, currRole) {
   if (
     currRole === 'employee' &&
     nextState !== 'view_my_tasks_started' &&
-    nextState !== 'update_assignment_status_started'
+    nextState !== 'mark_assignment_as_complete_started'
   ) {
     return 'unauthorized'
   }
@@ -843,7 +648,7 @@ function parseTaskDetails(text) {
   // Split each line
   const lines = text.split('\n')
 
-  const taskData = {}
+  let taskData = {}
   let foundColon = false
 
   // Convert each line into JS Object of key and value
@@ -861,7 +666,7 @@ function parseTaskDetails(text) {
   if (!foundColon) {
     return {
       success: false,
-      info: 'Reverting back to add_task_selectedClient because of no colon',
+      info: 'Reverting back to add_task_selectedClient because user entered no colons',
       message: 'No colons found in input, please enter task details as Key:Value pairs',
     }
   }
@@ -938,27 +743,52 @@ function generateUID(prefix, given_uidList) {
   return uid
 }
 
-// This function is used to set the processing flag and
-// work_process flag to false when exiting the workflow
-function endWorkflowUpdate(currUserID) {
-  return {
-    json: {
-      route: 'postgresNode',
-      info: `Setting processing_flag flag to false as exiting workflow`,
-      query: `
-        UPDATE track_session 
-        SET 
-          processing_flag = false,
-        WHERE user_id = '${currUserID}';
-      `.trim(),
-    },
-  }
-}
-
 // We use this function to convert DD-MM-YY format date to
 // postgres format of YYYY-MM-DD
 function convertToPostgresDate(ddmmyy) {
   const [dd, mm, yy] = ddmmyy.split('-').map(Number)
   const yyyy = 2000 + yy // Assuming 20YY; adjust if you're crossing centuries
   return `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`
+}
+
+// This function takes details to generate an SQL Update Query for track_session, and then returns the object
+function updateSessionQuery(updateInfo, nextStateStack, nextContextData, nextProcessingFlag) {
+  let contextDataString
+
+  if (
+    nextContextData === undefined ||
+    (typeof nextContextData === 'object' && Object.keys(nextContextData).length === 0)
+  ) {
+    contextDataString = `context_data = context_data`
+  } else if (typeof nextContextData === 'object') {
+    contextDataString = `context_data = '${JSON.stringify(nextContextData)}'::jsonb`
+  } else {
+    contextDataString = `context_data = ${nextContextData}` // assumed raw SQL string
+  }
+
+  return {
+    json: {
+      route: 'postgresNode',
+      info: updateInfo,
+      query: `
+        UPDATE track_session
+        SET 
+          state = '${JSON.stringify(nextStateStack)}'::jsonb,
+          ${contextDataString},
+          processing_flag = ${nextProcessingFlag},
+          last_updated = NOW()
+        WHERE telegram_id = '${currUserID}';
+      `.trim(),
+    },
+  }
+}
+
+function telegramMessage(info, message) {
+  return {
+    json: {
+      route: 'telegramNode',
+      info: info,
+      message: message,
+    },
+  }
 }
