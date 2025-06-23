@@ -113,7 +113,7 @@ if (processing_flag == true) {
   // Once the client list has been fetched, prepare list and ask user to select one
   // Next state: add_task_selectedClient
   if (currState === 'add_task_retrievedClients') {
-    const newStateStack = replaceTopState(session, 'add_task_selectedClient')
+    const newStateStack = replaceTopState(session, 'add_task_checkSelectedClient')
 
     // 🌼 Extract client list from context_data
     const clientList = Array.isArray(context.add_task.client_list)
@@ -129,9 +129,9 @@ if (processing_flag == true) {
       `Reply with the exact *UID* or *client name*.\n🌱 Or type /new to create a new client.`
 
     return [
-      telegramMessage('Sending list of clients to user and asking for selection', message),
+      telegramMessage(`Sending list of clients to user and asking for selection`, message),
       updateSessionQuery(
-        `Client List fetched. The user shall select a client. Updating state from add_task_retrievedClients to add_task_selectedClient`,
+        `Client List fetched. The user shall select a client. Updating state from add_task_retrievedClients to add_task_checkSelectedClient`,
         newStateStack,
         context,
         false
@@ -140,10 +140,10 @@ if (processing_flag == true) {
   }
 
   // 🌸 Flow: Add a new Task
-  // State: add_task_selectedClient
+  // State: add_task_checkSelectedClient
   // Once the user has entered a particular client, we check their validity and proceed accordingly.
-  // Next state: add_task_receivedTaskDetails
-  if (currState === 'add_task_selectedClient') {
+  // Next state: add_task_askForTaskDetails
+  if (currState === 'add_task_checkSelectedClient') {
     // TODO - adding a new client flow is pushed on top if input is /new
 
     // Fetch client list and check whether entered client exists in the database
@@ -159,7 +159,6 @@ if (processing_flag == true) {
         client.name.toLowerCase() === clientInput.toLowerCase()
     )
 
-    // If the client is not found or valid, go back to the previous state and try again
     if (!foundClient) {
       const revertStateStack = replaceTopState(session, 'add_task_retrievedClients')
       return [
@@ -168,7 +167,7 @@ if (processing_flag == true) {
           `⚠️ Hmm, I couldn't find a client by that name or UID. Please try again.\n`
         ),
         updateSessionQuery(
-          'Reverting state from add_task_selectedClient to add_task_retrievedClients due to invalid client selected.',
+          `Invalid client input, reverting to add_task_retrievedClients`,
           revertStateStack,
           context,
           true
@@ -176,29 +175,43 @@ if (processing_flag == true) {
       ]
     }
 
-    // If client is found, then proceed to ask task details
-    const newStateStack = replaceTopState(session, 'add_task_receivedTaskDetails')
+    const newStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
+    return [
+      updateSessionQuery(
+        `Client ${foundClient.name} selected — saving in context_data and moving to ask for task details`,
+        newStateStack,
+        `jsonb_set(
+        context_data,
+        '{add_task, selected_client}', to_jsonb(json_build_object('uid', '${foundClient.uid}','name', '${foundClient.name}'))
+      )`,
+        true
+      ),
+      telegramMessage(`tell wonderful after selecting client`, `✨ Wonderful!`),
+    ]
+  }
 
+  // 🌸 Flow: Add a new Task
+  // State: add_task_askForTaskDetails
+  // We have the client for which the new task must be added, so now proceed to ask for the task details
+  // Next state: add_task_askForTaskDetails
+  if (currState === 'add_task_askForTaskDetails') {
+    const newStateStack = replaceTopState(session, 'add_task_receivedTaskDetails')
+    const selectedClientName = context.add_task.selected_client.name
     // Prepare Message to send to user - asking to enter task details with an example
     const taskMessage =
-      `📝 Wonderful! Please share the task details in simple *Key:Value* format for ${foundClient.name}, like this:\n` +
+      `Please share the task details in *Key:Value* format.\n\nFor example:\n\n` +
       `*title*: Follow up with vendor\n` +
-      `*due*: 22-06-2025\n` +
+      `*due*: 22-06-25\n` +
       `*priority*: High\n` +
       `*status*: Not Started\n\n` +
       `🌼 Only *title* is required — the rest are optional and can be edited anytime.\n\n` +
       `Take your time. I'm right here when you're ready ✨`
-
-    // Store the client's name and UID in context_data
     return [
-      telegramMessage('Asking user for task details', taskMessage),
+      telegramMessage(`Asking user for task details`, taskMessage),
       updateSessionQuery(
-        `User will enter task details now. Storing selected client UID (${foundClient.uid}) in context_data`,
+        `User will enter task details now. Storing selected client (${selectedClientName}) in context_data`,
         newStateStack,
-        `jsonb_set(
-            context_data,
-            '{add_task, selected_client}', to_jsonb(json_build_object('uid', '${foundClient.uid}','name', '${foundClient.name}'))
-          ),`,
+        context,
         false
       ),
     ]
@@ -210,14 +223,14 @@ if (processing_flag == true) {
   // Next state: add_task_verifiedTaskDetails
   if (currState === 'add_task_receivedTaskDetails') {
     const taskText = String(currInput).trim()
-    const selectedClient = context.add_task.selectedClient || {}
+    const selectedClient = context.add_task.selected_client || {}
 
     // 🌿 Parse key:value input using helper function
     const parsedResult = parseTaskDetails(taskText)
 
     // If the input is not correct, then inform the user and try again.
     if (!parsedResult.success) {
-      const revertStateStack = replaceTopState(session, 'add_task_selectedClient')
+      const revertStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
       return [
         telegramMessage(parsedResult.info, parsedResult.message),
         updateSessionQuery(parsedResult.info, revertStateStack, context, true),
@@ -229,7 +242,7 @@ if (processing_flag == true) {
     const validation = validateTaskDetails(taskData)
 
     if (!validation.valid) {
-      const revertStateStack = replaceTopState(session, 'add_task_selectedClient')
+      const revertStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
 
       return [
         telegramMessage(validation.info, validation.message),
@@ -241,7 +254,7 @@ if (processing_flag == true) {
 
     // Prepare message to send to user about confirming whether the task looks good.
     const formattedMessage =
-      `🧑‍💼 ${selectedClient.name} [${selectedClient.uid}]\n\n` +
+      `🧑‍💼💼 ${selectedClient.name} [${selectedClient.uid}]\n\n` +
       `📝 ${taskData.title}\n` +
       `${taskData.due ? `📅 ${taskData.due}\n` : ''}` +
       `${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.priority}` : ''}${taskData.status ? ` | ⏳ ${taskData.status}` : ''}` : ''}\n` +
@@ -259,7 +272,10 @@ if (processing_flag == true) {
         newStateStack,
         `jsonb_set(
           context_data,
-          '{add_task, task_details}', to_jsonb('${JSON.stringify(taskData)}'::json`,
+          '{add_task, task_details}',
+          to_jsonb('${JSON.stringify(taskData)}'::json),
+          true
+        )`,
         false
       ),
     ]
@@ -275,11 +291,11 @@ if (processing_flag == true) {
 
     // If the user says "no" to the task details, then ask for it again
     if (input === 'no') {
-      const revertStateStack = replaceTopState(session, 'add_task_selectedClient')
+      const revertStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
       return [
         telegramMessage(
-          'Reverting back from add_task_verifiedTaskDetails to add_task_selectedClient since user said task details are not correct.',
-          '🌸 No worries, let’s try again. Please enter the task details once more!\n'
+          `Reverting back from add_task_verifiedTaskDetails to add_task_selectedClient since user said task details are not correct.`,
+          `🌸 No worries, let's try again. Please enter the task details once more!\n`
         ),
         updateSessionQuery(
           'User rejected task details — cleaning up and retrying. State becomes add_task_selectedClient',
@@ -294,11 +310,11 @@ if (processing_flag == true) {
     else if (input === 'yes') {
       const newStateStack = pushState(
         replaceTopState(session, 'add_task_retrievedTaskUIDs'),
-        'fetch_taskUIDs'
+        'fetch_tasks'
       )
       return [
         updateSessionQuery(
-          'Fetching existing task UIDs before generating a new one. State becomes add_task_retrievedTaskUIDs, fetch_taskUIDs',
+          'Fetching existing task UIDs before generating a new one. State becomes add_task_retrievedTaskUIDs, fetch_tasks',
           newStateStack,
           context,
           true
@@ -496,14 +512,7 @@ if (processing_flag == true) {
   // Pop the stack after this is complete
   if (currState === 'fetch_clientList') {
     const newStateStack = popState(session)
-    let caller = null
-
-    // Check who the caller was based on the below state on the stack
-    let tempStack = [...session] // Safe clone
-    tempStack = popState(tempStack)
-    if (peekState(tempStack) === 'add_task_retrievedClients') {
-      caller = 'add_task'
-    }
+    const caller = getCallerState(session, 'add_task_retrievedClients', 'add_task')
     return [
       updateSessionQuery(
         `Fetching clients for adding task by retrieving the data and placing in context_data`,
@@ -524,14 +533,7 @@ if (processing_flag == true) {
   // Pop the stack after this is complete
   if (currState === 'fetch_tasks') {
     const newStateStack = popState(session)
-    let caller = null
-
-    // Check who the caller was based on the below state on the stack
-    let tempStack = [...session] // Safe clone
-    tempStack = popState(tempStack)
-    if (peekState(tempStack) === 'add_task_retrievedTaskUIDs') {
-      caller = 'add_task'
-    }
+    const caller = getCallerState(session, 'add_task_retrievedTaskUIDs', 'add_task')
     return [
       updateSessionQuery(
         `Fetching tasks and placing in context_data for caller '${caller}'`,
@@ -716,7 +718,7 @@ function validateDueDate(dateStr) {
   if (!match) return false
 
   // Check if date and month values are valid
-  const [dd, mm, yy] = match.map(Number)
+  const [dd, mm, yy] = match.slice(1).map(Number)
   if (dd < 1 || dd > 31 || mm < 1 || mm > 12) return false
 
   // Check if date is realistic - not in the past and not in 100 years from present date
@@ -756,14 +758,20 @@ function updateSessionQuery(updateInfo, nextStateStack, nextContextData, nextPro
   let contextDataString
 
   if (
-    nextContextData === undefined ||
-    (typeof nextContextData === 'object' && Object.keys(nextContextData).length === 0)
+    nextContextData === undefined || // Case 1: context is undefined
+    (typeof nextContextData === 'object' && Object.keys(nextContextData).length === 0) // Case 1: OR context is an empty object
   ) {
+    // → No update needed to context_data, keep it unchanged
     contextDataString = `context_data = context_data`
   } else if (typeof nextContextData === 'object') {
+    // Case 2: We got a proper object — stringify and cast it to jsonb
     contextDataString = `context_data = '${JSON.stringify(nextContextData)}'::jsonb`
+  } else if (typeof nextContextData === 'string') {
+    // Case 3: A raw SQL snippet (e.g., jsonb_set(...))
+    contextDataString = `context_data = ${nextContextData.trim()}`
   } else {
-    contextDataString = `context_data = ${nextContextData}` // assumed raw SQL string
+    // Fallback: unexpected type — safest to just leave context_data as is
+    contextDataString = `context_data = context_data`
   }
 
   return {
@@ -791,4 +799,9 @@ function telegramMessage(info, message) {
       message: message,
     },
   }
+}
+
+function getCallerState(session, expectedState, callerTag) {
+  const temp = popState([...session])
+  return peekState(temp) === expectedState ? callerTag : null
 }
