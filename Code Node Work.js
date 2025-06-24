@@ -3,9 +3,10 @@ const session = $('Updated Session').first().json.state
 const context = $('Updated Session').first().json.context_data || {}
 const processing_flag = $('Updated Session').first().json.processing_flag
 const currInput = $('Trigger upon receiving telegram message').first().json.message.text
-const currUserID = $('Trigger upon receiving telegram message').first().json.message.from.id
+const currUserID = $('Trigger upon receiving telegram message').first().json.message.from.id // this means telegram ID
 const currUserName = $('Get User Details').first().json.first_name
 const currRole = $('Get User Details').first().json.role
+const currMemberID = $('Get User Details').first().json.uid // this means 5 digit member ID
 
 // Extract current state from the state stack
 let currState = peekState(session)
@@ -177,6 +178,7 @@ if (processing_flag == true) {
 
     const newStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
     return [
+      // TODO here after client is clear we can delete client list from context data - not needed
       updateSessionQuery(
         `Client ${foundClient.name} selected — saving in context_data and moving to ask for task details`,
         newStateStack,
@@ -355,6 +357,7 @@ if (processing_flag == true) {
 
     return [
       {
+        // Add new task into the database - tasks table
         json: {
           route: 'postgresNode',
           info: 'Inserting new task into DB table tasks',
@@ -367,14 +370,16 @@ if (processing_flag == true) {
               ${formattedDueDate ? `'${formattedDueDate}'` : 'NULL'},
               ${taskDetails.priority ? `'${taskDetails.priority}'` : 'NULL'},
               ${taskDetails.status ? `'${taskDetails.status}'` : 'NULL'},
-              '${currUserID}'
+              '${currMemberID}'
             );`.trim(),
         },
       },
       telegramMessage(
         'Asking user if they want to assign newly added task',
-        `✅ Task added successfully!\n\n✨ Would you like to assign this task to someone?\n\n🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`
+        `✅ Task added successfully!\n\n✨ Would you like to assign this task to someone?\n\n` +
+          `🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`
       ),
+      // TODO Update that task has been added and remove all non essential details from context_data - keep only selected client and task details. Remove client list.
       updateSessionQuery(`Updating state after task added`, newStateStack, context, false),
     ]
   }
@@ -390,9 +395,10 @@ if (processing_flag == true) {
     if (input === 'yes') {
       const newStateStack = pushState(
         replaceTopState(session, 'add_task_assignedTaskAdded'),
-        'assign_task'
+        'assign_task_askMembersTeam'
       )
       return [
+        // TODO before calling assign task, we must add the task's details into assign_task data in context_data
         updateSessionQuery(
           'User agreed to assign task — updating state stack to assign_task',
           newStateStack,
@@ -407,12 +413,12 @@ if (processing_flag == true) {
         updateSessionQuery(
           'Popping taskAdded state, going back to session_ongoing',
           poppedStateStack,
-          '{}',
+          `'{}'::jsonb`,
           true
         ),
         telegramMessage(
           'inform user that task is added and go to menu',
-          '✅The new task added was added successfully 🎈'
+          '✅ The new task was added successfully 🎈'
         ),
       ]
     }
@@ -421,8 +427,9 @@ if (processing_flag == true) {
     else
       return [
         telegramMessage(
-          'User entered wrong input when asking if they want to assign the task. Asking again.',
-          '🤔 I didn’t catch that. Would you like to assign this task?\n\n🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.'
+          `User entered wrong input when asking if they want to assign the task. Asking again.`,
+          `🤔 I didn’t catch that. Would you like to assign this task?\n\n` +
+            `🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`
         ),
         updateSessionQuery(
           'User entered wrong input when asking if they want to assign the task. Asking again.',
@@ -442,7 +449,7 @@ if (processing_flag == true) {
       updateSessionQuery(
         'The new task added was assigned successfully, now popping back to session_ongoing.\n',
         newStateStack,
-        '{}',
+        `'{}'::jsonb`,
         true
       ),
     ]
@@ -492,7 +499,7 @@ if (processing_flag == true) {
       return [
         telegramMessage(
           'User gave invalid input when asked if they want to do something else',
-          'Please only reply with either *yes* to continue or *no* to exit.'
+          'Please only reply with either *yes* to continue or *no* to exit. 😃'
         ),
         updateSessionQuery('User chose to perform another action.', session, context, false),
       ]
@@ -503,7 +510,12 @@ if (processing_flag == true) {
   if (currState === 'session_ended') {
     const newStateStack = replaceTopState(session, 'new_session')
     return [
-      updateSessionQuery('Starting new session from session_ended', newStateStack, context, true),
+      updateSessionQuery(
+        'Starting new session from session_ended',
+        newStateStack,
+        `'{}'::jsonb`,
+        true
+      ),
     ]
   }
 
@@ -536,23 +548,32 @@ if (processing_flag == true) {
     const caller = getCallerState(session, 'add_task_retrievedTaskUIDs', 'add_task')
     return [
       updateSessionQuery(
-        `Fetching tasks and placing in context_data for caller '${caller}'`,
+        `fetch_tasks: Fetching tasks and placing in context_data for caller '${caller}'`,
         newStateStack,
-        `jsonb_set(context_data,
-        '{${caller},task_list}',
-        to_jsonb((
-          SELECT json_agg(
-            json_build_object(
-              'uid', uid,
-              'title', title,
-              'client_uid', client_uid,
-              'priority', priority,
-              'due_date', due_date,
-              'created_by', created_by,
-              'status', status,
-              'created_at', created_at
-            )
-          ) FROM tasks
+        `jsonb_set(
+          COALESCE(context_data, '{}'),
+          '{add_task,task_list}',
+          COALESCE(
+            to_jsonb(
+              (
+                SELECT json_agg(
+                  json_build_object(
+                    'uid', uid,
+                    'title', title,
+                    'client_uid', client_uid,
+                    'priority', priority,
+                    'due_date', due_date,
+                    'created_by', created_by,
+                    'status', status,
+                    'created_at', created_at
+                  )
+                )
+                FROM tasks
+              )
+            ),
+            '[]'::jsonb
+          ),
+          true
         )`,
         true
       ),
@@ -728,6 +749,9 @@ function validateDueDate(dateStr) {
   const hundredYearsFromNow = new Date(now.getFullYear() + 100, 0, 1)
 
   return dueDate >= now && dueDate < hundredYearsFromNow
+  // TODO add a specific message for date being in the past and date being in the future, with humour
+  // TODO it should accept a lot of types of dates DD-MM-YYYY / D-M-YY - or any combination and the gopis should handle it
+  // TODO it should also be able to handle non date types formats - and for this it can be a different function that converts into a data like tomorrow, 5 days from now, Friday, etc. like that.
 }
 
 // Generate a new unique UID with given prefix and list
