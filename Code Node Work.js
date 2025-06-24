@@ -1,4 +1,4 @@
-// 📦 Extract commonly used session & user details
+// 📦 Extract commonly used session & user details from previous nodes
 const session = $('Updated Session').first().json.state
 const context = $('Updated Session').first().json.context_data || {}
 const processing_flag = $('Updated Session').first().json.processing_flag
@@ -12,7 +12,7 @@ const currMemberID = $('Get User Details').first().json.uid // this means 5 digi
 let currState = peekState(session)
 
 if (processing_flag == true) {
-  // 🌸 Start of the divine switch and state based routing
+  // 🌸 Start of the divine state based routing
 
   // State: new_session
   // 🌸 If a new session has started, greet the user and ask them what they wish to do.
@@ -28,7 +28,7 @@ if (processing_flag == true) {
       updateSessionQuery(
         'change state from new_session to session_started',
         newStateStack,
-        context,
+        `'{}'::jsonb`,
         false
       ),
     ]
@@ -73,7 +73,7 @@ if (processing_flag == true) {
         updateSessionQuery(
           'revert from session_started back to new_session because of invalid command',
           newStateStack,
-          `context::jsonb`,
+          context,
           false
         ),
       ]
@@ -146,6 +146,8 @@ if (processing_flag == true) {
   // Next state: add_task_askForTaskDetails
   if (currState === 'add_task_checkSelectedClient') {
     // TODO - adding a new client flow is pushed on top if input is /new
+    // TODO when they give /new, the state needs to become session_ongoing, add_task_askForTaskDetails, add_client
+    // TODO after that is done, if add_task called it then we will enter that client name into context_data.
 
     // Fetch client list and check whether entered client exists in the database
     const clientList = Array.isArray(context.add_task.client_list)
@@ -179,6 +181,7 @@ if (processing_flag == true) {
     const newStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
     return [
       // TODO here after client is clear we can delete client list from context data - not needed
+      // TODO if user presses back from ask for task details, we simply fetch the list again.
       updateSessionQuery(
         `Client ${foundClient.name} selected — saving in context_data and moving to ask for task details`,
         newStateStack,
@@ -188,7 +191,10 @@ if (processing_flag == true) {
       )`,
         true
       ),
-      telegramMessage(`tell wonderful after selecting client`, `✨ Wonderful!`),
+      telegramMessage(
+        `tell wonderful after selecting client to make them feel like a star`,
+        `✨ Wonderful!`
+      ),
     ]
   }
 
@@ -198,24 +204,17 @@ if (processing_flag == true) {
   // Next state: add_task_askForTaskDetails
   if (currState === 'add_task_askForTaskDetails') {
     const newStateStack = replaceTopState(session, 'add_task_receivedTaskDetails')
-    const selectedClientName = context.add_task.selected_client.name
     // Prepare Message to send to user - asking to enter task details with an example
     const taskMessage =
       `Please share the task details in *Key:Value* format.\n\nFor example:\n\n` +
       `*title*: Follow up with vendor\n` +
       `*due*: 22-06-25\n` +
-      `*priority*: High\n` +
-      `*status*: Not Started\n\n` +
+      `*priority*: High\n\n` +
       `🌼 Only *title* is required — the rest are optional and can be edited anytime.\n\n` +
       `Take your time. I'm right here when you're ready ✨`
     return [
       telegramMessage(`Asking user for task details`, taskMessage),
-      updateSessionQuery(
-        `User will enter task details now. Storing selected client (${selectedClientName}) in context_data`,
-        newStateStack,
-        context,
-        false
-      ),
+      updateSessionQuery(`User will enter task details now.`, newStateStack, context, false),
     ]
   }
 
@@ -243,6 +242,7 @@ if (processing_flag == true) {
     const taskData = parsedResult.data
     const validation = validateTaskDetails(taskData)
 
+    // TODO Need to upgrade date options in this, to allow for more versatile input of date
     if (!validation.valid) {
       const revertStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
 
@@ -254,12 +254,12 @@ if (processing_flag == true) {
 
     const newStateStack = replaceTopState(session, 'add_task_verifiedTaskDetails')
 
-    // Prepare message to send to user about confirming whether the task looks good.
+    // Prepare task with client card to send to user asking to confirm insertion.
     const formattedMessage =
       `🧑‍💼💼 ${selectedClient.name} [${selectedClient.uid}]\n\n` +
       `📝 ${taskData.title}\n` +
-      `${taskData.due ? `📅 ${taskData.due}\n` : ''}` +
-      `${taskData.priority || taskData.status ? `${taskData.priority ? `⚡ ${taskData.priority}` : ''}${taskData.status ? ` | ⏳ ${taskData.status}` : ''}` : ''}\n` +
+      (taskData.due ? `📅 ${taskData.due}\n` : '') +
+      (taskData.priority ? `⚡ ${taskData.priority}\n` : '') +
       `👥 —\n` +
       `✅ If this looks good, reply *yes* to confirm.\n` +
       `🚫 Or reply *no* to enter task details again.`
@@ -270,7 +270,8 @@ if (processing_flag == true) {
         formattedMessage
       ),
       updateSessionQuery(
-        'Saving parsed task details into context_data. Asking user if task is okay to be entered, and proceeding to add_task_verifiedDetails',
+        `add_task_receivedTaskDetails: Saving task details into context_data. ` +
+          `Asking user if task is okay to be entered, and proceeding to add_task_verifiedDetails`,
         newStateStack,
         `jsonb_set(
           context_data,
@@ -297,7 +298,7 @@ if (processing_flag == true) {
       return [
         telegramMessage(
           `Reverting back from add_task_verifiedTaskDetails to add_task_selectedClient since user said task details are not correct.`,
-          `🌸 No worries, let's try again. Please enter the task details once more!\n`
+          `🌸 No worries, let's try again.`
         ),
         updateSessionQuery(
           'User rejected task details — cleaning up and retrying. State becomes add_task_selectedClient',
@@ -316,7 +317,8 @@ if (processing_flag == true) {
       )
       return [
         updateSessionQuery(
-          'Fetching existing task UIDs before generating a new one. State becomes add_task_retrievedTaskUIDs, fetch_tasks',
+          `add_task_verifiedTaskDetails: Fetching existing task UIDs before generating a new one.` +
+            ` Calling fetch_tasks. State becomes add_task_retrievedTaskUIDs, fetch_tasks`,
           newStateStack,
           context,
           true
@@ -329,7 +331,7 @@ if (processing_flag == true) {
       return [
         telegramMessage(
           'User entered wrong input when asking if task details are correct.',
-          'Please only reply with either *yes* to confirm or *no* to re-enter task details.'
+          'Please only reply with either *yes* to confirm or *no* to re-enter task details. 👩‍🏫'
         ),
         updateSessionQuery(
           'User entered wrong input when asking if task details are correct.',
@@ -369,6 +371,7 @@ if (processing_flag == true) {
               '${taskDetails.title}',
               ${formattedDueDate ? `'${formattedDueDate}'` : 'NULL'},
               ${taskDetails.priority ? `'${taskDetails.priority}'` : 'NULL'},
+              // TODO edit the line below to make the status be passed as 'Not Started'
               ${taskDetails.status ? `'${taskDetails.status}'` : 'NULL'},
               '${currMemberID}'
             );`.trim(),
@@ -379,7 +382,6 @@ if (processing_flag == true) {
         `✅ Task added successfully!\n\n✨ Would you like to assign this task to someone?\n\n` +
           `🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`
       ),
-      // TODO Update that task has been added and remove all non essential details from context_data - keep only selected client and task details. Remove client list.
       updateSessionQuery(`Updating state after task added`, newStateStack, context, false),
     ]
   }
@@ -395,7 +397,8 @@ if (processing_flag == true) {
     if (input === 'yes') {
       const newStateStack = pushState(
         replaceTopState(session, 'add_task_assignedTaskAdded'),
-        'assign_task_askMembersTeam'
+        'assign_task_askForAssignees'
+        // TODO need to add this flow - and so once that is done, it just pops
       )
       return [
         // TODO before calling assign task, we must add the task's details into assign_task data in context_data
@@ -480,7 +483,7 @@ if (processing_flag == true) {
     if (currInput.toLowerCase() === 'no') {
       const newStateStack = replaceTopState(session, 'session_ended')
       return [
-        updateSessionQuery('User chose to end session', newStateStack, context, false),
+        updateSessionQuery('User chose to end session', newStateStack, `'{}'::jsonb`, false),
         telegramMessage(
           'User chose to end session',
           '🙏 Thank you for using RI Task List Bot.\nThe session has now ended.'
@@ -490,7 +493,12 @@ if (processing_flag == true) {
       const newStateStack = replaceTopState(session, 'new_session')
 
       return [
-        updateSessionQuery('User chose to perform another action.', newStateStack, context, true),
+        updateSessionQuery(
+          'User chose to perform another action.',
+          newStateStack,
+          `'{}'::jsonb`,
+          true
+        ),
       ]
     }
 
@@ -524,15 +532,24 @@ if (processing_flag == true) {
   // Pop the stack after this is complete
   if (currState === 'fetch_clientList') {
     const newStateStack = popState(session)
+    // TODO change this to use caller from context_data, and for all flows that can be called and proceed based on the caller.
     const caller = getCallerState(session, 'add_task_retrievedClients', 'add_task')
+
+    // This COALESCE function below in the SQL Query prevents errors due to null objects being returned
+
     return [
       updateSessionQuery(
         `Fetching clients for adding task by retrieving the data and placing in context_data`,
         newStateStack,
         `jsonb_set(
-          context_data,
+          COALESCE(context_data, '{}'::jsonb),
           '{${caller},client_list}',
-          to_jsonb( (SELECT json_agg(json_build_object('uid', uid, 'name', name)) FROM clients) ),
+          COALESCE(
+            to_jsonb(
+              (SELECT json_agg(json_build_object('uid', uid, 'name', name)) FROM clients)
+            ),
+            '[]'::jsonb
+          ),
           true
         )`,
         true
