@@ -97,13 +97,18 @@ if (processing_flag == true) {
   if (currState === 'add_task_started') {
     const newStateStack = pushState(
       replaceTopState(session, 'add_task_retrievedClients'),
-      'fetch_clientList'
+      'fetch_clients'
     )
     return [
       updateSessionQuery(
-        `Fetching clients for adding task by pushing fetch_clientList on stack`,
+        `Fetching clients for adding task by pushing fetch_clients on stack`,
         newStateStack,
-        `jsonb_set(context_data, '{add_task}', '{}'::jsonb, true)`,
+        `jsonb_set(
+          COALESCE(context_data, '{}'::jsonb),
+          '{fetch_clients,caller}',
+          to_jsonb('add_task'),
+          true
+        )`,
         true
       ),
     ]
@@ -145,16 +150,35 @@ if (processing_flag == true) {
   // Once the user has entered a particular client, we check their validity and proceed accordingly.
   // Next state: add_task_askForTaskDetails
   if (currState === 'add_task_checkSelectedClient') {
-    // TODO - adding a new client flow is pushed on top if input is /new
-    // TODO when they give /new, the state needs to become session_ongoing, add_task_askForTaskDetails, add_client
-    // TODO after that is done, if add_task called it then we will enter that client name into context_data.
+    const clientInput = String(currInput).trim()
+
+    // First check if user wants to add a new client and if so, proceed to the next state, calling add_client state on top
+    if (clientInput === '/new') {
+      const newStateStack = pushState(
+        replaceTopState(session, 'add_task_askForTaskDetails'),
+        'add_client'
+      )
+
+      return [
+        updateSessionQuery(
+          `add_task_checkSelectedClient: updating state to add_task_askForTaskDetails, add_client` +
+            ` as user wants to add new client for the new task they are adding.`,
+          newStateStack,
+          `jsonb_set(
+            COALESCE(context_data, '{}'::jsonb),
+            '{add_client,caller}',
+            to_jsonb('add_task'),
+            true
+            )`,
+          true
+        ),
+      ]
+    }
 
     // Fetch client list and check whether entered client exists in the database
     const clientList = Array.isArray(context.add_task.client_list)
       ? context.add_task.client_list
       : []
-
-    const clientInput = String(currInput).trim()
 
     const foundClient = clientList.find(
       (client) =>
@@ -180,13 +204,11 @@ if (processing_flag == true) {
 
     const newStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
     return [
-      // TODO here after client is clear we can delete client list from context data - not needed
-      // TODO if user presses back from ask for task details, we simply fetch the list again.
       updateSessionQuery(
         `Client ${foundClient.name} selected — saving in context_data and moving to ask for task details`,
         newStateStack,
         `jsonb_set(
-        context_data,
+        context_data - '{add_task,client_list}',
         '{add_task, selected_client}', to_jsonb(json_build_object('uid', '${foundClient.uid}','name', '${foundClient.name}'))
       )`,
         true
@@ -242,7 +264,6 @@ if (processing_flag == true) {
     const taskData = parsedResult.data
     const validation = validateTaskDetails(taskData)
 
-    // TODO Need to upgrade date options in this, to allow for more versatile input of date
     if (!validation.valid) {
       const revertStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
 
@@ -320,7 +341,12 @@ if (processing_flag == true) {
           `add_task_verifiedTaskDetails: Fetching existing task UIDs before generating a new one.` +
             ` Calling fetch_tasks. State becomes add_task_retrievedTaskUIDs, fetch_tasks`,
           newStateStack,
-          context,
+          `jsonb_set(
+            COALESCE(context_data, '{}'::jsonb),
+            '{fetch_tasks,caller}',
+            to_jsonb('add_task'),
+            true
+          )`,
           true
         ),
       ]
@@ -371,8 +397,7 @@ if (processing_flag == true) {
               '${taskDetails.title}',
               ${formattedDueDate ? `'${formattedDueDate}'` : 'NULL'},
               ${taskDetails.priority ? `'${taskDetails.priority}'` : 'NULL'},
-              // TODO edit the line below to make the status be passed as 'Not Started'
-              ${taskDetails.status ? `'${taskDetails.status}'` : 'NULL'},
+              'Not Started',
               '${currMemberID}'
             );`.trim(),
         },
@@ -382,7 +407,17 @@ if (processing_flag == true) {
         `✅ Task added successfully!\n\n✨ Would you like to assign this task to someone?\n\n` +
           `🧘‍♀️ Reply *yes* to assign.\n🌼 Reply *no* to skip.`
       ),
-      updateSessionQuery(`Updating state after task added`, newStateStack, context, false),
+      updateSessionQuery(
+        `Updating state after task added`,
+        newStateStack,
+        `jsonb_set(
+          COALESCE(context_data, '{}'::jsonb),
+          '{add_task,task_details,new_uid}',
+          to_jsonb('${taskUID}'),
+          true
+        )`,
+        false
+      ),
     ]
   }
 
@@ -396,16 +431,27 @@ if (processing_flag == true) {
 
     if (input === 'yes') {
       const newStateStack = pushState(
-        replaceTopState(session, 'add_task_assignedTaskAdded'),
-        'assign_task_askForAssignees'
-        // TODO need to add this flow - and so once that is done, it just pops
+        pushState(
+          replaceTopState(session, 'add_task_assignedTaskAdded'),
+          'assign_task_askForAssignees'
+        ),
+        'fetch_members'
       )
       return [
-        // TODO before calling assign task, we must add the task's details into assign_task data in context_data
         updateSessionQuery(
-          'User agreed to assign task — updating state stack to assign_task',
+          `User agreed to assign task — updating state stack to assign_task`,
           newStateStack,
-          context,
+          `jsonb_set(
+            jsonb_set(
+              COALESCE(context_data, '{}'::jsonb),
+              '{assign_task,caller}',
+              to_jsonb('add_task'),
+              true
+            ),
+            '{assign_task,selected_task_uid}',
+            to_jsonb('${context.add_task.task_details.uid}'),
+            true
+          )`,
           true
         ),
       ]
@@ -528,12 +574,11 @@ if (processing_flag == true) {
   }
 
   // 🌸 Subflow: fetching all clients details from the database
-  // State: fetch_clientList
+  // State: fetch_clients
   // Pop the stack after this is complete
-  if (currState === 'fetch_clientList') {
+  if (currState === 'fetch_clients') {
     const newStateStack = popState(session)
-    // TODO change this to use caller from context_data, and for all flows that can be called and proceed based on the caller.
-    const caller = getCallerState(session, 'add_task_retrievedClients', 'add_task')
+    const caller = context.fetch_clients.caller
 
     // This COALESCE function below in the SQL Query prevents errors due to null objects being returned
 
@@ -562,14 +607,15 @@ if (processing_flag == true) {
   // Pop the stack after this is complete
   if (currState === 'fetch_tasks') {
     const newStateStack = popState(session)
-    const caller = getCallerState(session, 'add_task_retrievedTaskUIDs', 'add_task')
+
+    const caller = context.fetch_tasks.caller
     return [
       updateSessionQuery(
         `fetch_tasks: Fetching tasks and placing in context_data for caller '${caller}'`,
         newStateStack,
         `jsonb_set(
           COALESCE(context_data, '{}'),
-          '{add_task,task_list}',
+          '{${caller},task_list}',
           COALESCE(
             to_jsonb(
               (
@@ -840,9 +886,4 @@ function telegramMessage(info, message) {
       message: message,
     },
   }
-}
-
-function getCallerState(session, expectedState, callerTag) {
-  const temp = popState([...session])
-  return peekState(temp) === expectedState ? callerTag : null
 }
