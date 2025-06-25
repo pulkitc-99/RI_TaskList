@@ -103,12 +103,24 @@ if (processing_flag == true) {
       updateSessionQuery(
         `Fetching clients for adding task by pushing fetch_clients on stack`,
         newStateStack,
-        `jsonb_set(
-          COALESCE(context_data, '{}'::jsonb),
-          '{fetch_clients,caller}',
-          to_jsonb('add_task'),
-          true
-        )`,
+        `
+          jsonb_set(
+            jsonb_set(
+              COALESCE(context_data, '{}'::jsonb),
+              '{add_task}',
+              '{}'::jsonb,
+              true
+            ),
+            '{fetch_clients}',
+            jsonb_set(
+              COALESCE(context_data->'fetch_clients', '{}'::jsonb),
+              '{caller}',
+              '"add_task"'::jsonb,
+              true
+            ),
+            true
+          )
+        `,
         true
       ),
     ]
@@ -126,7 +138,7 @@ if (processing_flag == true) {
       ? context.add_task.client_list
       : []
 
-    const clientText = clientList.map((client) => `🪔 ${client.name} (${client.uid})`).join('\n')
+    const clientText = clientList.map((client) => `🔹 ${client.name} (${client.uid})`).join('\n')
 
     // Prepare message to ask the user to choose a client from the list
     const message =
@@ -165,11 +177,16 @@ if (processing_flag == true) {
             ` as user wants to add new client for the new task they are adding.`,
           newStateStack,
           `jsonb_set(
-            COALESCE(context_data, '{}'::jsonb),
-            '{add_client,caller}',
-            to_jsonb('add_task'),
+          COALESCE(context_data, '{}'::jsonb),
+          '{add_client}',
+          jsonb_set(
+            COALESCE(context_data->'fetch_clients', '{}'::jsonb),
+            '{caller}',
+            '"add_task"'::jsonb,
             true
-            )`,
+          ),
+          true
+        )`,
           true
         ),
       ]
@@ -324,7 +341,14 @@ if (processing_flag == true) {
         updateSessionQuery(
           'User rejected task details — cleaning up and retrying. State becomes add_task_selectedClient',
           revertStateStack,
-          context - 'add_task.task_details',
+          `
+          jsonb_set(
+            COALESCE(context_data, '{}'::jsonb),
+            '{add_task,task_details}',
+            'null'::jsonb,
+            true
+          )
+          `,
           true
         ),
       ]
@@ -341,17 +365,23 @@ if (processing_flag == true) {
           `add_task_verifiedTaskDetails: Fetching existing task UIDs before generating a new one.` +
             ` Calling fetch_tasks. State becomes add_task_retrievedTaskUIDs, fetch_tasks`,
           newStateStack,
-          `jsonb_set(
+          `
+          jsonb_set(
             COALESCE(context_data, '{}'::jsonb),
-            '{fetch_tasks,caller}',
-            to_jsonb('add_task'),
+            '{fetch_tasks}',
+            jsonb_set(
+              COALESCE(context_data->'fetch_tasks', '{}'::jsonb),
+              '{caller}',
+              '"add_task"'::jsonb,
+              true
+            ),
             true
-          )`,
+          )
+          `,
           true
         ),
       ]
     }
-
     // If the user replies with anything other than "yes" or "no", tell them to enter again.
     else
       return [
@@ -377,6 +407,7 @@ if (processing_flag == true) {
     const selectedClient = context.add_task.selected_client
     const taskDetails = context.add_task.task_details
     const formattedDueDate = taskDetails.due ? convertToPostgresDate(taskDetails.due) : null
+    const priority = taskDetails.priority ? taskDetails.priority : 'medium'
     const tasksUIDList = context.add_task.task_list.map((task) => task.uid)
 
     // Generate Task UID (e.g., T4X2A)
@@ -389,17 +420,20 @@ if (processing_flag == true) {
         json: {
           route: 'postgresNode',
           info: 'Inserting new task into DB table tasks',
-          query: `
+          // TODO make the due date below without condition as it is already formatted above to null
+          query: String(
+            `
             INSERT INTO tasks (uid, client_uid, title, due_date, priority, status, created_by)
             VALUES (
               '${taskUID}',
               '${selectedClient.uid}',
               '${taskDetails.title}',
               ${formattedDueDate ? `'${formattedDueDate}'` : 'NULL'},
-              ${taskDetails.priority ? `'${taskDetails.priority}'` : 'NULL'},
+              '${priority}',
               'Not Started',
               '${currMemberID}'
-            );`.trim(),
+            );`.trim()
+          ),
         },
       },
       telegramMessage(
@@ -413,7 +447,7 @@ if (processing_flag == true) {
         `jsonb_set(
           COALESCE(context_data, '{}'::jsonb),
           '{add_task,task_details,new_uid}',
-          to_jsonb('${taskUID}'),
+          to_jsonb('${taskUID}'::text),
           true
         )`,
         false
@@ -580,23 +614,31 @@ if (processing_flag == true) {
     const newStateStack = popState(session)
     const caller = context.fetch_clients.caller
 
-    // This COALESCE function below in the SQL Query prevents errors due to null objects being returned
-
+    // The jsonb strip nulls removes keys with null values, and COALESCE handles null returns
     return [
       updateSessionQuery(
-        `Fetching clients for adding task by retrieving the data and placing in context_data`,
+        `Fetching clients for ${caller} by retrieving the data and placing in context_data, then cleaning fetch_clients`,
         newStateStack,
-        `jsonb_set(
-          COALESCE(context_data, '{}'::jsonb),
-          '{${caller},client_list}',
-          COALESCE(
-            to_jsonb(
-              (SELECT json_agg(json_build_object('uid', uid, 'name', name)) FROM clients)
+        `
+        jsonb_strip_nulls(
+          jsonb_set(
+            jsonb_set(
+              COALESCE(context_data, '{}'::jsonb),
+              '{${caller},client_list}',
+              COALESCE(
+                to_jsonb(
+                  (SELECT json_agg(json_build_object('uid', uid, 'name', name)) FROM clients)
+                ),
+                '[]'::jsonb
+              ),
+              true
             ),
-            '[]'::jsonb
-          ),
-          true
-        )`,
+            '{fetch_clients}',
+            'null'::jsonb,
+            true
+          )
+        )
+        `,
         true
       ),
     ]
@@ -611,33 +653,42 @@ if (processing_flag == true) {
     const caller = context.fetch_tasks.caller
     return [
       updateSessionQuery(
-        `fetch_tasks: Fetching tasks and placing in context_data for caller '${caller}'`,
+        `fetch_tasks: Fetching tasks and placing in context_data for caller '${caller}', then cleaning fetch_tasks`,
         newStateStack,
-        `jsonb_set(
-          COALESCE(context_data, '{}'),
-          '{${caller},task_list}',
-          COALESCE(
-            to_jsonb(
-              (
-                SELECT json_agg(
-                  json_build_object(
-                    'uid', uid,
-                    'title', title,
-                    'client_uid', client_uid,
-                    'priority', priority,
-                    'due_date', due_date,
-                    'created_by', created_by,
-                    'status', status,
-                    'created_at', created_at
+        `
+        jsonb_strip_nulls(
+          jsonb_set(
+            jsonb_set(
+              COALESCE(context_data, '{}'::jsonb),
+              '{${caller},task_list}',
+              COALESCE(
+                to_jsonb(
+                  (
+                    SELECT json_agg(
+                      json_build_object(
+                        'uid', uid,
+                        'title', title,
+                        'client_uid', client_uid,
+                        'priority', priority,
+                        'due_date', due_date,
+                        'created_by', created_by,
+                        'status', status,
+                        'created_at', created_at
+                      )
+                    )
+                    FROM tasks
                   )
-                )
-                FROM tasks
-              )
+                ),
+                '[]'::jsonb
+              ),
+              true
             ),
-            '[]'::jsonb
-          ),
-          true
-        )`,
+            '{fetch_tasks}',
+            'null'::jsonb,
+            true
+          )
+        )
+        `,
         true
       ),
     ]
@@ -789,6 +840,24 @@ function validateTaskDetails(data) {
     }
   }
 
+  const allowedPriorities = ['low', 'medium', 'high', 'urgent']
+  if (data.priority && !allowedPriorities.includes(data.priority.toLowerCase())) {
+    return {
+      valid: false,
+      info: 'Reverting back to add_task_selectedClient because of invalid priority',
+      message: `The 🔺 *priority* "${data.priority}" is not valid.\nPlease choose one of: *low, medium, high, urgent*.`,
+    }
+  }
+
+  const allowedStatuses = ['Not Started', 'In Progress', 'Completed', 'Halted', 'In Review']
+  if (data.status && !allowedStatuses.includes(data.status)) {
+    return {
+      valid: false,
+      info: 'Reverting back to add_task_selectedClient because of invalid status',
+      message: `The 📌 *status* "${data.status}" is not valid.\nPlease choose from: *Not Started, In Progress, Completed, Halted, In Review*.`,
+    }
+  }
+
   return {
     valid: true,
   }
@@ -842,34 +911,34 @@ function convertToPostgresDate(ddmmyy) {
 
 // This function takes details to generate an SQL Update Query for track_session, and then returns the object
 function updateSessionQuery(updateInfo, nextStateStack, nextContextData, nextProcessingFlag) {
-  let contextDataString
+  let contextUpdateClause
 
-  if (
-    nextContextData === undefined || // Case 1: context is undefined
-    (typeof nextContextData === 'object' && Object.keys(nextContextData).length === 0) // Case 1: OR context is an empty object
+  // Case 1: SQL snippet directly passed (e.g., jsonb_set(...) )
+  if (typeof nextContextData === 'string') {
+    contextUpdateClause = `context_data = ${nextContextData.trim()}`
+
+    // Case 2: JSON object passed — convert to proper JSONB
+  } else if (
+    typeof nextContextData === 'object' &&
+    nextContextData !== null &&
+    Object.keys(nextContextData).length > 0
   ) {
-    // → No update needed to context_data, keep it unchanged
-    contextDataString = `context_data = context_data`
-  } else if (typeof nextContextData === 'object') {
-    // Case 2: We got a proper object — stringify and cast it to jsonb
-    contextDataString = `context_data = '${JSON.stringify(nextContextData)}'::jsonb`
-  } else if (typeof nextContextData === 'string') {
-    // Case 3: A raw SQL snippet (e.g., jsonb_set(...))
-    contextDataString = `context_data = ${nextContextData.trim()}`
+    contextUpdateClause = `context_data = '${JSON.stringify(nextContextData)}'::jsonb`
+
+    // Case 3: No context update needed — keep as is
   } else {
-    // Fallback: unexpected type — safest to just leave context_data as is
-    contextDataString = `context_data = context_data`
+    contextUpdateClause = `context_data = context_data`
   }
 
   return {
     json: {
-      route: 'postgresNode',
+      route: 'updateSession',
       info: updateInfo,
       query: `
         UPDATE track_session
         SET 
           state = '${JSON.stringify(nextStateStack)}'::jsonb,
-          ${contextDataString},
+          ${contextUpdateClause},
           processing_flag = ${nextProcessingFlag},
           last_updated = NOW()
         WHERE telegram_id = '${currUserID}';

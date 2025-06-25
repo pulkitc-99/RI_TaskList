@@ -61,3 +61,10 @@ The naming of state is based on what is happening presently as the workflow is a
 ## Learnings
 
    Implement features depth-first rather than breadth-first. This means, don’t build the entire possibilities of workflow from the beginning. Implement one particular route functionality fully so you can identify challenges and then use what you learn.
+
+   n8n nodes can have lot of internal checks and quirks that breaks things, so try to handle things as much as possible within code nodes and pass clean data. Use simple settings.
+
+   Multiple items sent at once get fired in parallel by any node in n8n. You need to make sure items don't collide or cause ambiguity between nodes.
+   Don't output multiple items for a single node in a parallel node setup. It will all execute at once and cause issues. Make sure each parallel node gets only one task.
+
+   Before beginning development, make sure you are using the most suitable software stack for your work so that you don't have problems in the future. For this purpose, n8n was not suitable.
