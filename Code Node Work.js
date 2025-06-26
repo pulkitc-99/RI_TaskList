@@ -544,6 +544,99 @@ if (processing_flag == true) {
     ]
   }
 
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_started
+  // Started assigning an existing task, we fetch client list to ask user
+  // Next state stack: ..., assign_task_receivedClientList, fetch_clients
+  if (currState === 'assign_task_started'){
+    // TODO
+  }
+
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_retrievedClientList
+  // Retrieved list of clients. Prepare message and ask user to select with clickable UIDs
+  // Next state: ..., assign_task_selectedClient
+  if (currState === 'assign_task_retrievedClientList'){
+    // TODO
+  }
+
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_selectedClient
+  // User selected a client, validate it and then insert it into context_data, delete client_list.
+  // Fetch task list to ask the user
+  // Next state stack: ..., assign_task_retrievedTaskList, fetch_tasks
+  if (currState === 'assign_task_selectedClient'){
+    // TODO
+  }
+
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_retrievedTaskList
+  // Show user all the tasks and ask them to select one with clickable task UID
+  // Next state stack: ..., assign_task_selectedTask
+  if (currState === 'assign_task_retrievedTaskList'){
+    // TODO
+  }
+
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_selectedTask
+  // User selected a task, validate it and fetch list of members to ask the user
+  // Insert the task into context_data and delete the task_list
+  // Next state stack: ..., assign_task_retrievedMembersList, fetch_clients
+  if (currState === 'assign_task_selectedTask'){
+    // TODO
+  }
+
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_retrievedMembersList
+  // Show members list with clickable member UID and ask them to select one
+  // Next state stack: ..., assign_task_selectedMember
+  if (currState === 'assign_task_retrievedMembersList'){
+    // TODO
+  }
+
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_selectedMember
+  // User selected a member, validate it and then ask the user for further assignment details or skip
+  // Next state stack: ..., assign_task_receivedAssignmentDetails
+  if (currState === 'assign_task_selectedMember'){
+    // TODO
+  }
+
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_receivedAssignmentDetails
+  // Validate the assignment details entered by the user or /skip.
+  // Insert the assignment details into context_data
+  // Next state stack: ..., assign_task_validatedAssignmentDetails
+  if (currState === 'assign_task_receivedAssignmentDetails'){
+    // TODO
+  }
+
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_validatedAssignmentDetails
+  // We are ready to assign the task to the user, so execute the INSERT SQL Query
+  // Next state stack: ..., assign_task_postInsert
+  if (currState === 'assign_task_validatedAssignmentDetails'){
+    // TODO
+  }
+
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_postInsert
+  // Task Assigned, ask if the user wants to assign this task to another member
+  // If yes:  Next state stack: ..., assign_task_retrievedMemberList
+  // If no:   Next state stack: ..., assign_task_taskAssigned
+  if (currState === 'assign_task_postInsert'){
+    // TODO
+  }
+
+  // 🌸 Flow: Assign an existing task
+  // State: assign_task_taskAssigned
+  // All done, inform the user and pop
+  // Next state stack: ... (pop)
+  if (currState === 'assign_task_taskAssigned'){
+    // TODO
+  }
+
+
   // 🌸 Flow: Asking what user wants to do when selected other
   // State: other_started
   // Present all options to user and ask what they would like to do
@@ -600,7 +693,7 @@ if (processing_flag == true) {
     }
   }
 
-  // 🌸 Flow: Adding a new
+  // 🌸 Flow: Adding a new client
   // State: add_client_started
   // Ask user for new client's name
   if (currState === 'add_client_started') {

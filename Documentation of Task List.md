@@ -68,3 +68,5 @@ The naming of state is based on what is happening presently as the workflow is a
    Don't output multiple items for a single node in a parallel node setup. It will all execute at once and cause issues. Make sure each parallel node gets only one task.
 
    Before beginning development, make sure you are using the most suitable software stack for your work so that you don't have problems in the future. For this purpose, n8n was not suitable.
+
+   Changing SQL work from doing directly to an executing_sql node. This would allow for one single postgres node that handles all postgres node queries and executes them one by one. Further, we can have a processing_node that simply performs all the actions one by one such as SQL queries, telegram node, google sheet etc. and once all of that is done, we would continue. However, this feels too unnecessarily complicated and n8n will likely cause errors. This is better for an app. For now, continuing with current design.
