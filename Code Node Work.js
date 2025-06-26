@@ -138,7 +138,11 @@ if (processing_flag == true) {
       ? context.add_task.client_list
       : []
 
-    const clientText = clientList.map((client) => `🔹 ${client.name} (${client.uid})`).join('\n')
+    const sortedClientList = clientList.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+
+    const clientText = sortedClientList
+      .map((client) => `🔹 ${client.name} (${client.uid})`)
+      .join('\n')
 
     // Prepare message to ask the user to choose a client from the list
     const message =
@@ -168,7 +172,7 @@ if (processing_flag == true) {
     if (clientInput === '/new') {
       const newStateStack = pushState(
         replaceTopState(session, 'add_task_askForTaskDetails'),
-        'add_client'
+        'add_client_started'
       )
 
       return [
@@ -176,17 +180,19 @@ if (processing_flag == true) {
           `add_task_checkSelectedClient: updating state to add_task_askForTaskDetails, add_client` +
             ` as user wants to add new client for the new task they are adding.`,
           newStateStack,
-          `jsonb_set(
-          COALESCE(context_data, '{}'::jsonb),
-          '{add_client}',
-          jsonb_set(
-            COALESCE(context_data->'fetch_clients', '{}'::jsonb),
-            '{caller}',
-            '"add_task"'::jsonb,
-            true
-          ),
-          true
-        )`,
+          `jsonb_strip_nulls(
+            jsonb_set(
+              jsonb_set(
+                COALESCE(context_data, '{}'::jsonb),
+                '{add_client}',
+                jsonb_build_object('caller', 'add_task')::jsonb,
+                true
+              ),
+              '{add_task,client_list}',
+              'null'::jsonb,
+              true
+            )
+          )`,
           true
         ),
       ]
@@ -538,6 +544,237 @@ if (processing_flag == true) {
     ]
   }
 
+  // 🌸 Flow: Asking what user wants to do when selected other
+  // State: other_started
+  // Present all options to user and ask what they would like to do
+  if (currState === 'other_started') {
+    const newStateStack = replaceTopState(session, 'check_other_command')
+
+    const message =
+      `🌻 ${currUserName},\nPlease enter a command from the list below:\n\n` +
+      `👥 Clients\n` +
+      `/addc\nAdd a new client\n` +
+      `\n\n📋 Tasks\n` +
+      `\n\n👤 Members\n` +
+      `\n\n🌈 More coming soon...`
+    return [
+      telegramMessage('Present list of other commands to user', message),
+      updateSessionQuery(
+        `State changes from other_started to check_other_command. We check what "other" command the user enters.`,
+        newStateStack,
+        context,
+        false
+      ),
+    ]
+  }
+
+  // 🌸 Flow: Parsing user's input about other command
+  // State: check_other_command
+  // Check user's input for other command
+  if (currState === 'check_other_command') {
+    const nextState = getOtherCommandNextState(currInput)
+
+    if (nextState === 'invalid') {
+      return [
+        telegramMessage(
+          `Invalid command entered in Other section`,
+          `❌ Oops, I couldn't understand that command.\n🌸 Please enter a valid command.`
+        ),
+        updateSessionQuery(
+          'Reverting back to other_started because of invalid command',
+          session,
+          context,
+          false
+        ),
+      ]
+    } else {
+      const newStateStack = replaceTopState(session, nextState)
+      return [
+        updateSessionQuery(
+          `Updating state to push ${nextState} on top of session_ongoing`,
+          newStateStack,
+          context,
+          true
+        ),
+      ]
+    }
+  }
+
+  // 🌸 Flow: Adding a new
+  // State: add_client_started
+  // Ask user for new client's name
+  if (currState === 'add_client_started') {
+    const newStateStack = pushState(
+      replaceTopState(session, 'add_client_receivedClientName'),
+      'fetch_clients'
+    )
+    return [
+      telegramMessage(`asking user the client's name`, `Please enter the new client's name ☺`),
+      updateSessionQuery(
+        `Fetching clients for adding task by pushing fetch_clients on stack`,
+        newStateStack,
+        `
+          jsonb_set(
+            jsonb_set(
+              COALESCE(context_data, '{}'::jsonb),
+              '{add_client}',
+              COALESCE(context_data->'add_client', '{}'::jsonb),
+              true
+            ),
+            '{fetch_clients}',
+            jsonb_set(
+              COALESCE(context_data->'fetch_clients', '{}'::jsonb),
+              '{caller}',
+              '"add_client"'::jsonb,
+              true
+            ),
+            true
+          )
+        `,
+        false
+      ),
+    ]
+  }
+
+  // 🌸 Flow: Add a new Client
+  // State: add_client_receivedClientName
+  // Once the user has entered a name, check for exact duplicates (case + whitespace insensitive)
+  // Next state (if valid): add_client_verifiedClientName
+  if (currState === 'add_client_receivedClientName') {
+    const rawInput = String(currInput || '')
+    const newClientName = rawInput.trim().toLowerCase()
+
+    const clientList = Array.isArray(context.add_client?.client_list)
+      ? context.add_client.client_list
+      : []
+
+    const duplicateClient = clientList.find((client) => {
+      return client.name?.trim().toLowerCase() === newClientName
+    })
+
+    if (duplicateClient) {
+      const message =
+        `⚠️ A client named *"${duplicateClient.name}"* already exists.\n\n` +
+        `🌸 Please enter a *unique client name*.`
+
+      return [
+        telegramMessage(`Duplicate client name detected`, message),
+        updateSessionQuery(
+          `Duplicate client. Remaining in add_client_receivedClientName.`,
+          session,
+          context,
+          false
+        ),
+      ]
+    }
+
+    // 🌱 If name is valid and unique, proceed to next state
+    const newStateStack = replaceTopState(session, 'add_client_verifiedClientName')
+
+    return [
+      updateSessionQuery(
+        `Client name is valid and unique. Moving to add_client_verifiedClientName`,
+        newStateStack,
+        `jsonb_set(
+          COALESCE(context_data, '{}'::jsonb),
+          '{add_client,new_client_name}',
+          to_jsonb('${rawInput.trim()}'::text),
+          true
+        )`,
+        true
+      ),
+    ]
+  }
+
+  // 🌸 Flow: Add a new Client
+  // State: add_client_verifiedClientName
+  // Proceed with generating unique ID and enter it into the database
+  if (currState === 'add_client_verifiedClientName') {
+    const clientList = Array.isArray(context.add_client.client_list)
+      ? context.add_client.client_list
+      : []
+
+    // 🌷 Retrieve name of new client from context
+    const newClientName = context.add_client.new_client_name?.trim()
+    const uidList = clientList.map((c) => c.uid)
+
+    // 🌿 Generate UID
+    const clientUID = generateUID('C', uidList)
+    const newStateStack = replaceTopState(session, 'add_client_clientAdded')
+
+    return [
+      {
+        json: {
+          route: 'postgresNode',
+          info: 'Inserting new client into DB table clients',
+          query: `
+          INSERT INTO clients (uid, name)
+          VALUES ('${clientUID}', '${newClientName}');
+        `.trim(),
+        },
+      },
+      updateSessionQuery(
+        `Inserted new client ${newClientName}. Now proceeding to add_client_clientAdded`,
+        newStateStack,
+        `jsonb_set(
+        COALESCE(context_data, '{}'::jsonb),
+        '{add_client,new_client_uid}',
+        to_jsonb('${clientUID}'::text),
+        true
+      )`,
+        true
+      ),
+    ]
+  }
+
+  // 🌸 Flow: Add a new Client
+  // State: add_client_clientAdded
+  // New client is added, now check if it was called, and if yes, proceed accordingly, inform the user and pop
+  if (currState === 'add_client_clientAdded') {
+    const newClientUID = context.add_client?.new_client_uid
+    const newClientName = context.add_client?.new_client_name
+    const caller = context.add_client?.caller || null
+
+    const newStateStack = popState(session)
+
+    const extraQuery =
+      caller === 'add_task'
+        ? `jsonb_strip_nulls(
+         jsonb_set(
+           jsonb_set(
+             COALESCE(context_data, '{}'::jsonb),
+             '{add_task,selected_client}',
+             jsonb_build_object('uid', '${newClientUID}', 'name', '${newClientName}'),
+             true
+           ),
+           '{add_client}',
+           'null'::jsonb,
+           true
+         )
+       )`
+        : `jsonb_strip_nulls(
+         jsonb_set(
+           COALESCE(context_data, '{}'::jsonb),
+           '{add_client}',
+           'null'::jsonb,
+           true
+         )
+       )`
+    return [
+      telegramMessage(
+        'Informing user that new client has been added',
+        `✅ Client *${newClientName}* has been added successfully!\n` +
+          (caller === 'add_task' ? `🌼 Now continuing with adding your new task.` : ``)
+      ),
+      updateSessionQuery(
+        `Client added. Context updated. Caller: ${caller || 'none'}`,
+        newStateStack,
+        extraQuery,
+        true
+      ),
+    ]
+  }
+
   // 🌸 Flow: Last Intention Ended
   // State: session_ongoing
   // Ask the user if they would like to do anything else
@@ -776,6 +1013,22 @@ function getNextStateFromInput(input, currRole) {
   ) {
     return 'unauthorized'
   }
+
+  return nextState || 'invalid'
+}
+
+// Get the next state based on the command entered in the "Other" menu
+function getOtherCommandNextState(input) {
+  /** @type {{ [key: string]: string }} */
+  const mapping = {
+    '/addc': 'add_client_started',
+    '/deleteC': 'delete_client_started', // placeholder if you add later
+    '/deleteT': 'delete_task_started', // placeholder if you add later
+    '/addM': 'add_member_started', // placeholder if you add later
+  }
+
+  const key = String(input).trim().toLowerCase()
+  const nextState = mapping[key]
 
   return nextState || 'invalid'
 }
