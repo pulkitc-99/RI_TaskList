@@ -39,5 +39,6 @@ eslint-report.txt
 dist/
 build/
 
+rough.js
 
 Common Commands
