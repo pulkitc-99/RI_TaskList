@@ -434,7 +434,7 @@ if (processing_flag == true) {
       title: taskDetails.title,
       due_date: formattedDueDate ? `'${formattedDueDate}'` : 'NULL',
       priority: taskPriority,
-      status: 'Not Started',
+      status: 'pending',
       created_by: currMemberID,
     }
 
@@ -658,8 +658,8 @@ if (processing_flag == true) {
 
     const message =
       `🌷 ${currUserName},\n` +
-      `Please choose the client to whom the task to be assigned belongs to:\n\n${clientText}\n\n👉` +
-      `🌱 Click on the client's UID displayed next to their name.\n\n` +
+      `Please choose the client to whom the task to be assigned belongs to:\n\n${clientText}\n\n` +
+      `👉 Click on the client's UID displayed next to their name.\n\n` +
       `Note: Only the clients having at least one task have been displayed.`
 
     return [
@@ -767,8 +767,8 @@ if (processing_flag == true) {
 
     // 🌼 Prepare message for user
     const message =
-      `Please choose the task you wish to assign:\n\n${taskText}\n\n👉` +
-      `🌱 Click on the task's UID displayed next to its title.`
+      `Please choose the task you wish to assign:\n\n${taskText}\n\n` +
+      `👉 Click on the task's UID displayed next to its title.`
 
     return [
       telegramMessage(`Sending list of tasks to user and asking for selection`, message),
@@ -839,7 +839,10 @@ if (processing_flag == true) {
           '{assign_task,selected_task}',
           jsonb_build_object(
             'uid', '${selectedTask.uid}',
-            'title', '${selectedTask.title}'
+            'title', '${selectedTask.title}',
+            'client_uid', '${selectedTask.client_uid}',
+            'due_date', '${selectedTask.due_date}',
+            'priority', '${selectedTask.priority}'
           ),
           true
         ),
@@ -961,9 +964,10 @@ if (processing_flag == true) {
     const detailsMessage =
       `✨ Almost there! Let's add a few optional details for this assignment:\n\n` +
       `Please use *Key:Value* format. For example:\n\n` +
-      `*responsibility*: Call client and update sheet\n` +
+      `*resp*: Call client and update sheet\n` +
       `*priority*: High\n` +
       `*due*: 01-07-25\n\n` +
+      `(resp - short for responsibility)\n\n` +
       `🌱 You can type any or all. To skip, simply click here → */skip*.`
 
     const newStateStack = replaceTopState(session, 'assign_task_receivedAssignmentDetails')
@@ -997,21 +1001,38 @@ if (processing_flag == true) {
     const selectedClient = context.assign_task.selected_client
     const selectedMember = context.assign_task.selected_member
 
-    const taskDue = cuteDate(YYMDtoDMY(selectedTask.due_date))
+    const taskDue = selectedTask.due_date ? cuteDate(YYMDtoDMY(selectedTask.due_date)) : null
     const taskPriority = selectedTask.priority
     const taskStatus = selectedTask.status
 
     // 🧚 If user skipped input
     if (assignmentDetailsInput.toLowerCase() === '/skip') {
+      const previewText = renderTasksView({
+        clients: [{ uid: selectedClient.uid, name: selectedClient.name }],
+        tasks: [
+          {
+            uid: selectedTask.uid,
+            client_uid: selectedTask.client_uid,
+            title: selectedTask.title,
+            priority: taskPriority,
+            due: taskDue,
+            status: taskStatus,
+          },
+        ],
+        assignments: [
+          {
+            task_uid: selectedTask.uid,
+            first_name: selectedMember.first_name,
+          },
+        ],
+      })
+
+      // 🌸 Add confirmation instructions
       const confirmMessage =
-        `🧑‍💼💼 ${selectedClient.name}\n\n` +
-        `📌 ${selectedTask.title}\n` +
-        (taskDue ? `📅 ${taskDue}\n` : '') +
-        (taskPriority ? `⚡ ${taskPriority}\n` : '') +
-        (taskStatus ? `📌 ${taskStatus}\n` : '') +
-        `\n👤 ${selectedMember.first_name}\n\n` +
-        `🌿 No extra assignment details provided.\nDefault values will be used.\n\n` +
-        `✅ Click */yes* to confirm assignment.\n🚫 Or click */no* to change details.`
+        previewText +
+        `\n\n🌿 No extra assignment details provided.\nDefault values will be used.\n\n` +
+        `✅\tClick */yes* to confirm assignment.\n🚫\tClick */no* to change details.`
+      // TODO It is not displaying the task's date for some reason, investigate.
 
       return [
         telegramMessage(`Asking user to confirm assignment after /skip`, confirmMessage),
@@ -1023,7 +1044,7 @@ if (processing_flag == true) {
               jsonb_set(
                 context_data,
                 '{assign_task,assignment_details}',
-                '{"responsibility": null, "priority": null, "due": null}'::jsonb,
+                '{"resp": null, "priority": null, "due": null}'::jsonb,
                 true
               ),
               '{fetch_assignments}',
@@ -1047,7 +1068,7 @@ if (processing_flag == true) {
     }
 
     const data = parsedResult.data
-    const allowedKeys = ['responsibility', 'priority', 'due']
+    const allowedKeys = ['resp', 'priority', 'due']
     const invalidKeys = Object.keys(data).filter((k) => !allowedKeys.includes(k))
 
     if (invalidKeys.length > 0) {
@@ -1055,12 +1076,13 @@ if (processing_flag == true) {
       return [
         telegramMessage(
           `Invalid fields entered`,
-          `❌ Unknown field(s): *${invalidKeys.join(', ')}*\nPlease use only: *responsibility, priority, due*`
+          `❌ Unknown field(s): *${invalidKeys.join(', ')}*\nPlease use only: *resp, priority, due*`
         ),
         updateSessionQuery(`Invalid fields in assignment input`, revertStateStack, context, true),
       ]
     }
-    const dateValidation = validateDueDate(data.due)
+
+    const dateValidation = data.due ? validateDueDate(data.due) : null
     if (data.due && !dateValidation.valid) {
       const revertStateStack = replaceTopState(session, 'assign_task_askForAssignmentDetails')
       return [
@@ -1084,18 +1106,31 @@ if (processing_flag == true) {
       ]
     }
 
-    // 🌟 Final confirm message with all values
+    const previewText = renderTasksView({
+      clients: [{ uid: selectedClient.uid, name: selectedClient.name }],
+      tasks: [
+        {
+          uid: selectedTask.uid,
+          client_uid: selectedTask.client_uid,
+          title: selectedTask.title,
+          priority: taskPriority,
+          due: taskDue,
+          status: taskStatus,
+        },
+      ],
+      assignments: [
+        {
+          task_uid: selectedTask.uid,
+          first_name: selectedMember.first_name,
+          resp: data.resp,
+          due: data.due,
+        },
+      ],
+    })
+
+    // 🌸 Add confirmation instructions
     const confirmMessage =
-      `🧑‍💼💼 ${selectedClient.name}\n\n` +
-      `📌 ${selectedTask.title}\n` +
-      (taskDue ? `📅 ${taskDue}\n` : '') +
-      (taskPriority ? `⚡ ${taskPriority}\n` : '') +
-      (taskStatus ? `📌 ${taskStatus}\n` : '') +
-      `\n👤 ${selectedMember.first_name} [${selectedMember.uid}]\n` +
-      (data.responsibility ? `📝 ${data.responsibility}\n` : '') +
-      (data.priority ? `⚡ ${data.priority}\n` : '') +
-      (data.due ? `📅 ${cuteDate(dateToDMY(dateValidation.parsedDate))}\n` : '') +
-      `\n✅ Click */yes* to confirm assignment.\n🚫 Click */no* to re-enter.`
+      previewText + `\n\n✅ Click */yes* to confirm assignment.\n🚫 Click */no* to re-enter.`
 
     return [
       telegramMessage(`Confirming assignment with user`, confirmMessage),
@@ -1163,7 +1198,9 @@ if (processing_flag == true) {
     const task = context.assign_task?.selected_task
     const member = context.assign_task?.selected_member
     const details = context.assign_task?.assignment_details
-    const formattedDueDate = details.due ? dateToYYMD(validateDueDate(details.due)) : null
+    const formattedDueDate = details.due
+      ? dateToYYMD(validateDueDate(details.due).parsedDate)
+      : null
 
     // 🌼 Pull existing assignment UIDs from context
     const assignmentUIDList = (context.assign_task?.assignment_list || []).map((a) => a.uid) || []
@@ -1186,8 +1223,8 @@ if (processing_flag == true) {
       '${task.uid}',
       '${member.uid}',
       '${currMemberID}',
-      'Not Started',
-      ${details.responsibility ? `'${details.responsibility.replace(/'/g, "''")}'` : 'NULL'},
+      'pending',
+      ${details.resp ? `'${details.resp.replace(/'/g, "''")}'` : 'NULL'},
       ${formattedDueDate ? `'${formattedDueDate}'` : 'NULL'},
       ${details.priority ? `'${details.priority.toLowerCase()}'` : `'medium'`}
     )`
@@ -1769,7 +1806,7 @@ if (processing_flag == true) {
                         'due_date', due_date,
                         'task_uid', task_uid,
                         'member_uid', member_uid,
-                        'responsibility', responsibility,
+                        'resp', responsibility,
                         'uid', uid,
                         'status', status,
                         'assigned_by', assigned_by,
@@ -2114,14 +2151,14 @@ function YYMDtoDMY(yyyymmdd) {
 }
 
 function validateStatus(givenStatus) {
-  const allowedStatuses = ['Not Started', 'In Progress', 'In Review', 'Completed', 'Halted']
+  const allowedStatuses = ['pending', 'review', 'done', 'scrapped']
   if (givenStatus && !allowedStatuses.includes(givenStatus)) {
     return {
       valid: false,
       info: 'Reverting back to add_task_askForTaskDetails because of invalid status',
       message:
         `The 📌 *status* "${givenStatus}" is not valid.\n` +
-        `Please choose from: *Not Started, In Progress, Completed, Halted, In Review*.`,
+        `Please choose from: *pending, review, done, scrapped*.`,
     }
   }
 
@@ -2243,4 +2280,72 @@ function telegramMessage(info, message) {
       message: message,
     },
   }
+}
+
+// 🌷 Main renderer function
+function renderTasksView({ clients, tasks, assignments }) {
+  if (!Array.isArray(clients) || !clients.length) return '🌱 No clients to display.'
+  if (!Array.isArray(tasks) || !tasks.length) return '🌱 No tasks found.'
+  const lines = []
+
+  const statusMap = {
+    pending: '🟡 Pending',
+    review: '🔵 In Review',
+    done: '✅ Done',
+    scrapped: '🗑️ Scrapped',
+  }
+
+  for (const client of clients) {
+    // Get all the tasks belonging to the current client
+    const clientTasks = tasks.filter((t) => t.client_uid === client.uid)
+    // If the current client has no tasks then continue
+    if (!clientTasks.length) continue
+
+    // First writing the client name as a cute header
+    lines.push(`👨‍💼 ${client.name}`)
+    lines.push('────────────────────────────')
+
+    // Loop over each of the tasks belonging to this client
+    for (const task of clientTasks) {
+      lines.push(`🧾 ${task.title}`)
+
+      // Remember not to perform any validations here, this function is just for rendering text
+      if (task.due) {
+        lines.push(`📅 ${task.due}`)
+      }
+
+      if (task.priority) {
+        lines.push(`⚡ Priority: ${capitalize(task.priority)}`)
+      }
+
+      if (task.status) {
+        lines.push(`${statusMap[task.status]}`)
+      }
+
+      const taskAssignments = assignments.filter((a) => a.task_uid === task.uid)
+      if (taskAssignments.length) {
+        lines.push(`\n👥 Assignments:`)
+        for (const a of taskAssignments) {
+          const resp = a.resp ? ` → "${a.resp}"` : ''
+          const status = statusMap[a.status] || ''
+          let due = ''
+
+          if (a.due) {
+            const validatedA = validateDueDate(a.due)
+            if (validatedA?.valid) {
+              due = `(Due: ${cuteDate(dateToDMY(validatedA.parsedDate))})`
+            }
+          }
+
+          lines.push(`▫️ ${a.first_name || 'Unassigned'}${resp} ${due} ${status}`.trim())
+        }
+      }
+
+      lines.push('') // Empty line between tasks
+    }
+
+    lines.push('') // Extra space between clients
+  }
+
+  return lines.join('\n').trim()
 }
