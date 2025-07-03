@@ -1398,7 +1398,54 @@ if (processing_flag == true) {
   // We shall fetch all the info from the database and keep it ready
   // Next state stack: ..., view_tasks_retrievedData, fetch_members, fetch_tasks, fetch_clients, fetch_assignments
   if (currState === 'view_tasks_started') {
-    // TODO
+    const newStateStack = pushState(
+      pushState(
+        pushState(
+          pushState(replaceTopState(session, 'view_tasks_retrievedData'), 'fetch_members'),
+          'fetch_tasks'
+        ),
+        'fetch_clients'
+      ),
+      'fetch_assignments'
+    )
+
+    const contextDataSQL = `
+      jsonb_set(
+        jsonb_set(
+          jsonb_set(
+            jsonb_set(
+              jsonb_set(
+                coalesce(context_data, '{}'::jsonb),
+                '{view_tasks}',
+                '{}'::jsonb,
+                true
+              ),
+              '{fetch_assignments}',
+              jsonb_build_object('caller', 'view_tasks'),
+              true
+            ),
+            '{fetch_clients}',
+            jsonb_build_object('caller', 'view_tasks'),
+            true
+          ),
+          '{fetch_tasks}',
+          jsonb_build_object('caller', 'view_tasks'),
+          true
+        ),
+        '{fetch_members}',
+        jsonb_build_object('caller', 'view_tasks'),
+        true
+      )
+    `
+
+    return [
+      updateSessionQuery(
+        'User selected view tasks — setting up fetch flows with view_tasks as caller',
+        newStateStack,
+        contextDataSQL,
+        true
+      ),
+    ]
   }
 
   // 🌸 Flow: Viewing Tasks
