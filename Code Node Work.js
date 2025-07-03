@@ -1514,15 +1514,7 @@ if (processing_flag == true) {
         `⚠️ A client named *"${duplicateClient.name}"* already exists.\n\n` +
         `🌸 Please enter a *unique client name*.`
 
-      return [
-        telegramMessage(`Duplicate client name detected`, message),
-        updateSessionQuery(
-          `Duplicate client. Remaining in add_client_receivedClientName.`,
-          session,
-          context,
-          false
-        ),
-      ]
+      return [telegramMessage(`Duplicate client name detected`, message)]
     }
 
     // 🌱 If name is valid and unique, proceed to next state
