@@ -1454,7 +1454,27 @@ if (processing_flag == true) {
   // Now we shall ask the user to input what filter they want to put or /all → store it in context_data
   // Next state stack: ..., view_tasks_askFilterValue
   if (currState === 'view_tasks_retrievedData') {
-    // TODO
+    const newStateStack = pushState(session, 'view_tasks_askFilterValue')
+
+    return [
+      telegramMessage(
+        `Asking user to select a filter to view tasks`,
+        `⚙️ How would you like to *filter* the tasks?\n\n` +
+          `• */client*\n` +
+          `• */due*\n` +
+          `• */member*\n` +
+          `• */status*\n` +
+          `• */priority*\n\n` +
+          `🌿 Or */all* to view all pending tasks\n\n` +
+          `(Completed/Scrapped tasks are not shown)`
+      ),
+      updateSessionQuery(
+        `User is being asked to choose a task filter — proceeding to askFilterValue`,
+        newStateStack,
+        context,
+        false
+      ),
+    ]
   }
 
   // 🌸 Flow: Viewing Tasks
