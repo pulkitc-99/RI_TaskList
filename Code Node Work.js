@@ -1396,8 +1396,43 @@ if (processing_flag == true) {
   // State: view_tasks_started
   // The user has selected "🔍 View Tasks" from the greeting menu
   // We shall fetch all the info from the database and keep it ready
-  // Next state stack: ..., view_tasks_askFilter, fetch_members, fetch_tasks, fetch_clients, fetch_assignments
+  // Next state stack: ..., view_tasks_retrievedData, fetch_members, fetch_tasks, fetch_clients, fetch_assignments
   if (currState === 'view_tasks_started') {
+    // TODO
+  }
+
+  // 🌸 Flow: Viewing Tasks
+  // State: view_tasks_started
+  // We have fetched all the data from the database
+  // Now we shall ask the user to input what filter they want to put or /all → store it in context_data
+  // Next state stack: ..., view_tasks_askFilterValue
+  if (currState === 'view_tasks_retrievedData') {
+    // TODO
+  }
+
+  // 🌸 Flow: Viewing Tasks
+  // State: view_tasks_started
+  // The user has select their filter. We will ask to enter filter value → store it in context_data
+  // Next state stack: ..., view_tasks_validateFilter
+  if (currState === 'view_tasks_askFilterValue') {
+    // TODO
+  }
+
+  // 🌸 Flow: Viewing Tasks
+  // State: view_tasks_started
+  // We will validate the user's filter value and then if all good, proceed. Else ask to re-enter.
+  // Next state stack: ..., view_tasks_showTasks
+  if (currState === 'view_tasks_validateFilter') {
+    // TODO
+  }
+
+  // 🌸 Flow: Viewing Tasks
+  // State: view_tasks_started
+  // Filter is good and validated, now we shall filter the
+  // tasks and display them using renderTasksView function
+  // Next state stack: ..., pop
+  if (currState === 'view_tasks_showTasks') {
+    // TODO
   }
 
   // 🌸 Flow: Asking what user wants to do when selected other
