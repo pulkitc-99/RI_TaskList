@@ -303,19 +303,30 @@ if (processing_flag == true) {
     const newStateStack = replaceTopState(session, 'add_task_verifiedTaskDetails')
 
     // Prepare task with client card to send to user asking to confirm insertion.
-    const formattedMessage =
-      `🧑‍💼💼 ${selectedClient.name}\n\n` +
-      `📝 ${taskData.title}\n` +
-      (validation.dueDate ? `📅 ${cuteDate(validation.dueDate)}\n` : '') +
-      (taskData.priority ? `⚡ ${taskData.priority}\n` : '') +
-      `👥 —\n\n` +
-      `✅ If this looks good, click */yes* to confirm.\n` +
-      `🚫 Or click */no* to enter task details again.`
+    const previewText = renderTasksView({
+      clients: [{ uid: selectedClient.uid, name: selectedClient.name }],
+      tasks: [
+        {
+          client_uid: selectedClient.uid,
+          title: taskData.title,
+          priority: taskData.priority ? `${taskData.priority}` : '',
+          due: validation.dueDate ? `${cuteDate(validation.dueDate)}` : '',
+        },
+      ],
+      assignments: [],
+    })
+
+    // 🌸 Add confirmation instructions
+    const confirmMessage =
+      previewText +
+      `\n\n👥 —\n\n` +
+      `If this looks good,\n✅ Click */yes* to confirm, or\n` +
+      `🚫 Click */no* to enter task details again.`
 
     return [
       telegramMessage(
         'Confirming task details with user (yes/no) in formatted client card style',
-        formattedMessage
+        confirmMessage
       ),
       updateSessionQuery(
         `add_task_receivedTaskDetails: Saving task details into context_data. ` +
@@ -426,7 +437,7 @@ if (processing_flag == true) {
     // Generate Task UID (e.g., T4X2A)
     const tasksUIDList = context.add_task.task_list.map((task) => task.uid)
     const taskUID = generateUID('T', tasksUIDList)
-    const newStateStack = replaceTopState(session, 'add_task_taskAdded')
+    const newStateStack = pushState(replaceTopState(session, 'add_task_taskAdded'), 'fetch_tasks')
 
     const fields = {
       uid: taskUID,
@@ -468,12 +479,24 @@ if (processing_flag == true) {
       updateSessionQuery(
         `Updating state after task added`,
         newStateStack,
-        `jsonb_set(
-          COALESCE(context_data, '{}'::jsonb),
-          '{add_task,task_details,new_uid}',
-          to_jsonb('${taskUID}'::text),
-          true
-        )`,
+        `
+          jsonb_set(
+            jsonb_set(
+              jsonb_set(
+                COALESCE(context_data, '{}'::jsonb),
+                '{add_task,task_list}',
+                'null'::jsonb,
+                true
+              ),
+              '{add_task,task_details,new_uid}',
+              to_jsonb('${taskUID}'::text),
+              true
+            ),
+            '{fetch_tasks}',
+            jsonb_build_object('caller', 'add_task'),
+            true
+          )
+        `,
         false
       ),
     ]
@@ -482,36 +505,64 @@ if (processing_flag == true) {
   // 🌸 Flow: Add a new Task
   // State: add_task_taskAdded
   // The task has been added and user was asked whether to assign it
-  // If YES: Next state stack → add_task_assignedTaskAdded, assign_task
+  // If YES: Next state stack → ..., add_task_assignedTaskAdded, assign_task_retrievedMembersList, fetch_members
   // If NO: Pop the state and continue gracefully
   if (currState === 'add_task_taskAdded') {
     const input = String(currInput).trim().toLowerCase().replace('/', '')
 
     if (input === 'yes') {
-      // TODO Add this flow -- if they say yes, check which data is needed and make the context_data like so
-      // TODO check this flow fully
       const newStateStack = pushState(
         pushState(
           replaceTopState(session, 'add_task_assignedTaskAdded'),
-          'assign_task_askForAssignees'
+          'assign_task_retrievedMembersList'
         ),
         'fetch_members'
       )
-      return [
-        updateSessionQuery(
-          `User agreed to assign task — updating state stack to assign_task`,
-          newStateStack,
-          `jsonb_set(
+
+      const taskList = context.add_task?.task_list || []
+      const newTaskUID = context.add_task?.task_details?.new_uid
+      const selectedTask = taskList.find((t) => t.uid === newTaskUID)
+      const selectedClient = context.add_task?.selected_client
+
+      const contextDataSQL = `
+        jsonb_strip_nulls(
+          jsonb_set(
             jsonb_set(
-              COALESCE(context_data, '{}'::jsonb),
-              '{assign_task,caller}',
-              to_jsonb('add_task'),
+              jsonb_set(
+                coalesce(context_data, '{}'::jsonb),
+                '{assign_task}',
+                jsonb_build_object(
+                  'selected_task', jsonb_build_object(
+                    'uid', '${selectedTask.uid}',
+                    'title', '${selectedTask.title}',
+                    'due_date', ${selectedTask.due_date ? `'${selectedTask.due_date}'` : 'null'},
+                    'priority', '${selectedTask.priority}',
+                    'client_uid', '${selectedTask.client_uid}'
+                  ),
+                  'selected_client', jsonb_build_object(
+                    'uid', '${selectedClient.uid}',
+                    'name', '${selectedClient.name}'
+                  ),
+                  'caller', 'add_task'
+                ),
+                true
+              ),
+              '{fetch_members}',
+              jsonb_build_object('caller', 'assign_task'),
               true
             ),
-            '{assign_task,selected_task_uid}',
-            to_jsonb('${context.add_task.task_details.uid}'),
+            '{add_task}',
+            'null'::jsonb,
             true
-          )`,
+          )
+        )
+      `
+
+      return [
+        updateSessionQuery(
+          `User agreed to assign task — preparing context_data for assign_task`,
+          newStateStack,
+          contextDataSQL,
           true
         ),
       ]
@@ -545,7 +596,7 @@ if (processing_flag == true) {
         telegramMessage(
           `User entered wrong input when asking if they want to assign the task. Asking again.`,
           `🤔 I didn't catch that. Would you like to assign this task?\n\n` +
-            `🧘‍♀️ Click *yes* to assign.\n🌼 Click *no* to skip.`
+            `🧘‍♀️ Click */yes* to assign.\n🌼 Click */no* to skip.`
         ),
         updateSessionQuery(
           'User entered wrong input when asking if they want to assign the task. Asking again.',
@@ -857,7 +908,8 @@ if (processing_flag == true) {
         `Task selected (${selectedTask.uid}). Pushing fetch_members to fetch team list.`,
         newStateStack,
         updateContextQuery,
-        true
+        false
+        //TODO This is temporary! make this true again
       ),
     ]
   }
@@ -1031,8 +1083,7 @@ if (processing_flag == true) {
       const confirmMessage =
         previewText +
         `\n\n🌿 No extra assignment details provided.\nDefault values will be used.\n\n` +
-        `✅\tClick */yes* to confirm assignment.\n🚫\tClick */no* to change details.`
-      // TODO It is not displaying the task's date for some reason, investigate.
+        `✅\tClick */yes* to confirm assignment.\n🚫\tClick */no* to re-enter.`
 
       return [
         telegramMessage(`Asking user to confirm assignment after /skip`, confirmMessage),
@@ -1339,6 +1390,14 @@ if (processing_flag == true) {
         true
       ),
     ]
+  }
+
+  // 🌸 Flow: Viewing Tasks
+  // State: view_tasks_started
+  // The user has selected "🔍 View Tasks" from the greeting menu
+  // We shall fetch all the info from the database and keep it ready
+  // Next state stack: ..., view_tasks_askFilter, fetch_members, fetch_tasks, fetch_clients, fetch_assignments
+  if (currState === 'view_tasks_started') {
   }
 
   // 🌸 Flow: Asking what user wants to do when selected other
@@ -1966,7 +2025,6 @@ function parseTaskDetails(text) {
   return { success: true, data: taskData }
 }
 
-// Validate the User's Input when they have entered task details
 function validateTaskDetails(data) {
   if (!data.title) {
     return {
@@ -1987,16 +2045,19 @@ function validateTaskDetails(data) {
     }
   }
 
-  const vDate = validateDueDate(data.due)
-
-  if (data.due && !vDate.valid) {
-    return {
-      valid: false,
-      info:
-        `Reverting back to add_task_askForTaskDetails because of incorrect date.\n` +
-        `Reason: ${vDate.reason}`,
-      message: `${vDate.reason}. Please try again.`,
+  let parsedDueDate = null
+  if (typeof data.due === 'string' && data.due.trim()) {
+    const vDate = validateDueDate(data.due.trim())
+    if (!vDate.valid) {
+      return {
+        valid: false,
+        info:
+          `Reverting back to add_task_askForTaskDetails because of incorrect date.\n` +
+          `Reason: ${vDate.reason}`,
+        message: `${vDate.reason}\nPlease try again.`,
+      }
     }
+    parsedDueDate = vDate.parsedDate
   }
 
   const allowedPriorities = ['low', 'medium', 'high', 'urgent']
@@ -2010,7 +2071,7 @@ function validateTaskDetails(data) {
 
   return {
     valid: true,
-    dueDate: dateToDMY(vDate.parsedDate),
+    dueDate: parsedDueDate ? dateToDMY(parsedDueDate) : null,
   }
 }
 
