@@ -1463,10 +1463,9 @@ if (processing_flag == true) {
           `• */client*\n` +
           `• */due*\n` +
           `• */member*\n` +
-          `• */status*\n` +
-          `• */priority*\n\n` +
-          `🌿 Or */all* to view all pending tasks\n\n` +
-          `(Completed/Scrapped tasks are not shown)`
+          `• */priority*\n` +
+          `• */status*\n\n` +
+          `🌿 Or */all* to view all pending tasks`
       ),
       updateSessionQuery(
         `User is being asked to choose a task filter — proceeding to askFilterValue`,
@@ -1482,7 +1481,146 @@ if (processing_flag == true) {
   // The user has select their filter. We will ask to enter filter value → store it in context_data
   // Next state stack: ..., view_tasks_validateFilter
   if (currState === 'view_tasks_askFilterValue') {
-    // TODO
+    const selectedFilter = String(currInput).trim().toLowerCase().replace('/', '')
+    const allowedFilters = ['all', 'client', 'due', 'member', 'status', 'priority']
+
+    if (!allowedFilters.includes(selectedFilter)) {
+      const revertStateStack = replaceTopState(session, 'view_tasks_retrievedData')
+      return [
+        telegramMessage(
+          `User entered invalid filter option in view_tasks_askFilterValue`,
+          `🤔 I didn't understand that.\nLet's try again.`
+        ),
+        updateSessionQuery(
+          `Invalid filter option entered, retrying`,
+          revertStateStack,
+          context,
+          true
+        ),
+      ]
+    }
+
+    const newStateStack = replaceTopState(session, 'view_tasks_validateFilter')
+
+    const updatedContext = {
+      ...context,
+      view_tasks: {
+        ...(context.view_tasks || {}),
+        selected_filter: selectedFilter,
+      },
+    }
+
+    // 🍃 Case 1: No filter - show all
+    if (selectedFilter === 'all') {
+      return [
+        updateSessionQuery(
+          `User selected no filter (/all). Proceeding to validateFilter`,
+          newStateStack,
+          updatedContext,
+          false
+        ),
+      ]
+    }
+
+    // 👨‍💼 Case 2: Client Filter
+    if (selectedFilter === 'client') {
+      const clientList = context.view_tasks?.client_list || []
+      const taskList = context.view_tasks?.task_list || []
+
+      // 🌼 Build a Set of client UIDs who have tasks
+      const clientsWithTasks = new Set(taskList.map((task) => task.client_uid))
+
+      // 🌼 Filter the clients to only those with at least one task
+      const filteredClientList = clientList.filter((client) => clientsWithTasks.has(client.uid))
+
+      // 🌼 Sort the filtered list by client name
+      const sortedClientList = filteredClientList.sort((a, b) => a.name.localeCompare(b.name))
+
+      const clientText = sortedClientList
+        .map((client) => `🔹 ${client.name} (/${client.uid})`)
+        .join('\n')
+
+      const msg =
+        `Please select a 👨‍💼 *client* to filter by:\n\n${clientText}\n\n` +
+        `👉 Tap the UID next to the client's name.\n\n` +
+        `Note: Only the clients having at least one task have been displayed.`
+
+      return [
+        telegramMessage(`Prompting client list for filtering`, msg),
+        updateSessionQuery(
+          `Prompting user to enter client UID`,
+          newStateStack,
+          updatedContext,
+          false
+        ),
+      ]
+    }
+
+    // 🌼 Case 3: Due Date Filter
+    if (selectedFilter === 'due') {
+      const today = new Date()
+      const ddmmyy = dateToDMY(new Date())
+      const weekday = today.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase()
+
+      const msg =
+        `📅 Please enter a *due date* to filter by:\n\n` +
+        `Format options:\n• DD-MM-YY\n→ like ${ddmmyy}\n\n• Day of week\n→ like ${weekday}\n\n• Or use /today or /tomorrow`
+
+      return [
+        telegramMessage(`Prompting for due date filter`, msg),
+        updateSessionQuery(
+          `Prompting user to enter due date`,
+          newStateStack,
+          updatedContext,
+          false
+        ),
+      ]
+    }
+
+    // 🌸 Case 4: Team Member Filter
+    if (selectedFilter === 'member') {
+      const members = context.view_tasks?.member_list || []
+      const sortedMembers = members.sort((a, b) => a.first_name.localeCompare(b.first_name))
+      const memberText = sortedMembers.map((m) => `👤 ${m.first_name} (/${m.uid})`).join('\n')
+
+      const msg =
+        `👥 Please select a *team member* to filter by:\n\n${memberText}\n\n` +
+        `👉 Tap the UID next to the member's name.`
+
+      return [
+        telegramMessage(`Prompting member list for filtering`, msg),
+        updateSessionQuery(
+          `Prompting user to enter member UID`,
+          newStateStack,
+          updatedContext,
+          false
+        ),
+      ]
+    }
+
+    // 🔺 Case 5: Priority Filter
+    if (selectedFilter === 'priority') {
+      const msg =
+        `🔺 Please choose one of the following *priority* levels:\n\n` +
+        `• /low\n• /medium\n• /high\n• /urgent`
+
+      return [
+        telegramMessage(`Prompting priority options`, msg),
+        updateSessionQuery(`Prompting user for priority`, newStateStack, updatedContext, false),
+      ]
+    }
+
+    // 📌 Case 6: Status Filter
+    if (selectedFilter === 'status') {
+      const msg =
+        `📌 Please choose a *task status* to filter by:\n\n` +
+        `• /pending\n• /review\n• /scrapped\n• /done`
+
+      return [
+        telegramMessage(`Prompting task status options`, msg),
+        updateSessionQuery(`Prompting user for task status`, newStateStack, updatedContext, false),
+      ]
+    }
   }
 
   // 🌸 Flow: Viewing Tasks
