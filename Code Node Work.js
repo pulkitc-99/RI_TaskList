@@ -908,8 +908,7 @@ if (processing_flag == true) {
         `Task selected (${selectedTask.uid}). Pushing fetch_members to fetch team list.`,
         newStateStack,
         updateContextQuery,
-        false
-        //TODO This is temporary! make this true again
+        true
       ),
     ]
   }
@@ -1454,7 +1453,7 @@ if (processing_flag == true) {
   // Now we shall ask the user to input what filter they want to put or /all → store it in context_data
   // Next state stack: ..., view_tasks_askFilterValue
   if (currState === 'view_tasks_retrievedData') {
-    const newStateStack = pushState(session, 'view_tasks_askFilterValue')
+    const newStateStack = replaceTopState(session, 'view_tasks_askFilterValue')
 
     return [
       telegramMessage(
@@ -1517,7 +1516,7 @@ if (processing_flag == true) {
           `User selected no filter (/all). Proceeding to validateFilter`,
           newStateStack,
           updatedContext,
-          false
+          true
         ),
       ]
     }
@@ -1628,16 +1627,263 @@ if (processing_flag == true) {
   // We will validate the user's filter value and then if all good, proceed. Else ask to re-enter.
   // Next state stack: ..., view_tasks_showTasks
   if (currState === 'view_tasks_validateFilter') {
-    // TODO
+    const input = String(currInput).trim()
+    const selectedFilter = context.view_tasks?.selected_filter
+    const clientList = context.view_tasks?.client_list || []
+    const memberList = context.view_tasks?.member_list || []
+
+    const newStateStack = replaceTopState(session, 'view_tasks_showTasks')
+
+    // 🌷 If the user selected "all", no validation needed
+    if (selectedFilter === 'all') {
+      const updatedContext = {
+        ...context,
+        view_tasks: {
+          ...(context.view_tasks || {}),
+          filter_value: 'all',
+        },
+      }
+
+      return [
+        updateSessionQuery(
+          'User selected /all, skipping filter value validation and proceeding to showTasks',
+          newStateStack,
+          updatedContext,
+          true
+        ),
+      ]
+    }
+
+    // 🌷 Validate based on selected filter
+    let isValid = false
+    let errorMessage = ''
+    const cleanedInput = input.replace('/', '').toLowerCase()
+
+    switch (selectedFilter) {
+      case 'client': {
+        const clientUIDs = clientList.map((c) => c.uid)
+        if (clientUIDs.includes(input.replace('/', '').toUpperCase())) {
+          isValid = true
+        } else {
+          errorMessage = `Hmm, that client UID isn't valid. Please select one from the list above.`
+        }
+        break
+      }
+
+      case 'member': {
+        const memberUIDs = memberList.map((m) => m.uid)
+        if (memberUIDs.includes(input.replace('/', '').toUpperCase())) {
+          isValid = true
+        } else {
+          errorMessage = `That member UID isn't valid. Please select one from the list above.`
+        }
+        break
+      }
+
+      case 'status': {
+        const allowedStatuses = ['pending', 'review', 'done', 'scrapped']
+        if (allowedStatuses.includes(cleanedInput)) {
+          isValid = true
+        } else {
+          errorMessage = `Please click a valid status: */pending*, */review*, */done*, or */scrapped*.`
+        }
+        break
+      }
+
+      case 'priority': {
+        const allowedPriorities = ['low', 'medium', 'high', 'urgent']
+        if (allowedPriorities.includes(cleanedInput)) {
+          isValid = true
+        } else {
+          errorMessage = `Please click a valid priority: */low*, */medium*, */high*, or */urgent*.`
+        }
+        break
+      }
+
+      case 'due': {
+        const result = validateDueDate(cleanedInput)
+        if (result.valid) {
+          isValid = true
+        } else {
+          errorMessage = `❗ ${result.reason}\nPlease enter a valid due date (e.g., *05-07-25*, *today*, *friday*).`
+        }
+        break
+      }
+
+      default: {
+        errorMessage = `Hmm, something went wrong. The filter type wasn't recognized.`
+      }
+    }
+
+    if (!isValid) {
+      return [
+        telegramMessage('Invalid filter value entered, asking again.', `🚫 ${errorMessage}`),
+        updateSessionQuery(
+          'User entered invalid filter value, staying in same state.',
+          session,
+          context,
+          false
+        ),
+      ]
+    }
+
+    // 🌸 All good! Store the filter value and move ahead
+    const updatedContext = {
+      ...context,
+      view_tasks: {
+        ...(context.view_tasks || {}),
+        filter_value:
+          selectedFilter === 'due'
+            ? validateDueDate(cleanedInput).parsedDate // 🗓 Store parsed format for due
+            : input.replace('/', ''),
+      },
+    }
+
+    return [
+      updateSessionQuery(
+        'Filter value validated successfully, moving to showTasks.',
+        newStateStack,
+        updatedContext,
+        true
+      ),
+    ]
   }
 
   // 🌸 Flow: Viewing Tasks
-  // State: view_tasks_started
+  // State: view_tasks_showTasks
   // Filter is good and validated, now we shall filter the
   // tasks and display them using renderTasksView function
   // Next state stack: ..., pop
   if (currState === 'view_tasks_showTasks') {
-    // TODO
+    const selectedFilter = context.view_tasks.selected_filter
+    const filterValue = context.view_tasks.filter_value
+
+    const taskList = Array.isArray(context.view_tasks.task_list) ? context.view_tasks.task_list : []
+    const clientList = Array.isArray(context.view_tasks.client_list)
+      ? context.view_tasks.client_list
+      : []
+    const assignmentList = Array.isArray(context.view_tasks.assignment_list)
+      ? context.view_tasks.assignment_list
+      : []
+    const memberList = Array.isArray(context.view_tasks.member_list)
+      ? context.view_tasks.member_list
+      : []
+
+    // 🌼 Remove scrapped and done
+    const activeTasks = taskList.filter(
+      ({ status }) => !(status === 'scrapped' || status === 'done')
+    )
+
+    // 🌿 Enrich assignments with member names
+    const enrichedAssignments = assignmentList.map((a) => ({
+      ...a,
+      first_name: memberList.find((m) => m.uid === a.member_uid)?.first_name,
+    }))
+
+    // 🌷 Determine base task list for filtering
+    let baseTasks = selectedFilter === 'status' ? taskList : activeTasks
+
+    // 🌷 Prepare filtered tasks
+    let filteredTasks = baseTasks
+
+    switch (selectedFilter) {
+      case 'all':
+        // no filtering needed
+        break
+
+      case 'client':
+        filteredTasks = activeTasks.filter((task) => task.client_uid === filterValue)
+        break
+
+      case 'due':
+        // Convert the filterValue to YYMD format as that is how we store it in the database
+        filteredTasks = activeTasks.filter((task) => {
+          if (!task.due_date) return false
+          return new Date(task.due_date) <= new Date(filterValue)
+        })
+        break
+
+      case 'member': {
+        const assignedTaskUIDs = enrichedAssignments
+          .filter((a) => a.member_uid === filterValue)
+          .map((a) => a.task_uid)
+
+        filteredTasks = activeTasks.filter((task) => assignedTaskUIDs.includes(task.uid))
+        break
+      }
+
+      case 'priority':
+        filteredTasks = activeTasks.filter((task) => task.priority === filterValue)
+        break
+
+      case 'status':
+        filteredTasks = activeTasks.filter((task) => task.status === filterValue)
+        break
+    }
+
+    // If no tasks found for given filter and filter value, inform accordingly and exit
+    if (!filteredTasks.length) {
+      return [
+        telegramMessage(
+          `No tasks found for the '${selectedFilter}' filter.`,
+          '🌱 No tasks found upon filtering.'
+        ),
+        updateSessionQuery(
+          `No tasks found using '${selectedFilter}' filter.`,
+          popState(session),
+          `jsonb_strip_nulls(
+        jsonb_set(
+          COALESCE(context_data, '{}'::jsonb),
+          '{view_tasks}',
+          'null'::jsonb,
+          true
+        )
+      )`,
+          true
+        ),
+      ]
+    }
+
+    // 🌷 Filter clients that have at least one task
+    const visibleClientUIDs = new Set(filteredTasks.map((t) => t.client_uid))
+    const visibleClients = clientList.filter((c) => visibleClientUIDs.has(c.uid))
+    // 🌼 Format task.due_date using cuteDate
+    const formattedTasks = filteredTasks.map((task) => ({
+      ...task,
+      due: task.due_date ? cuteDate(YYMDtoDMY(task.due_date)) : null,
+    }))
+
+    // 🌼 Format assignment.due_date using cuteDate
+    const formattedAssignments = enrichedAssignments.map((a) => ({
+      ...a,
+      due: a.due_date ? cuteDate(YYMDtoDMY(a.due_date)) : null,
+    }))
+
+    // All dates in tasks and assignments need to be converted to cute dates before sending
+    const messageText = renderTasksView({
+      clients: visibleClients,
+      // tasks: filteredTasks,
+      // assignments: enrichedAssignments,
+      tasks: formattedTasks,
+      assignments: formattedAssignments,
+    })
+
+    return [
+      telegramMessage(`Displaying tasks with '${selectedFilter}' filter`, messageText),
+      updateSessionQuery(
+        `Rendered tasks using '${selectedFilter}' filter.`,
+        popState(session),
+        `jsonb_strip_nulls(
+        jsonb_set(
+          COALESCE(context_data, '{}'::jsonb),
+          '{view_tasks}',
+          'null'::jsonb,
+          true
+        )
+      )`,
+        true
+      ),
+    ]
   }
 
   // 🌸 Flow: Asking what user wants to do when selected other
@@ -2588,9 +2834,21 @@ function renderTasksView({ clients, tasks, assignments }) {
     scrapped: '🗑️ Scrapped',
   }
 
+  const priorityOrder = {
+    urgent: 1,
+    high: 2,
+    medium: 3,
+    low: 4,
+  }
+
   for (const client of clients) {
     // Get all the tasks belonging to the current client
-    const clientTasks = tasks.filter((t) => t.client_uid === client.uid)
+    const clientTasks = tasks
+      .filter((t) => t.client_uid === client.uid)
+      .sort((a, b) => {
+        return priorityOrder[a.priority] - priorityOrder[b.priority]
+      })
+
     // If the current client has no tasks then continue
     if (!clientTasks.length) continue
 
@@ -2600,7 +2858,7 @@ function renderTasksView({ clients, tasks, assignments }) {
 
     // Loop over each of the tasks belonging to this client
     for (const task of clientTasks) {
-      lines.push(`🧾 ${task.title}`)
+      lines.push(`📋 ${capitalize(task.title)}`)
 
       // Remember not to perform any validations here, this function is just for rendering text
       if (task.due) {
@@ -2608,7 +2866,7 @@ function renderTasksView({ clients, tasks, assignments }) {
       }
 
       if (task.priority) {
-        lines.push(`⚡ Priority: ${capitalize(task.priority)}`)
+        lines.push(`⚡ ${capitalize(task.priority)}`)
       }
 
       if (task.status) {
@@ -2620,17 +2878,10 @@ function renderTasksView({ clients, tasks, assignments }) {
         lines.push(`\n👥 Assignments:`)
         for (const a of taskAssignments) {
           const resp = a.resp ? ` → "${a.resp}"` : ''
+          const due = a.due ? `\n📅 ${a.due})` : ''
           const status = statusMap[a.status] || ''
-          let due = ''
 
-          if (a.due) {
-            const validatedA = validateDueDate(a.due)
-            if (validatedA?.valid) {
-              due = `(Due: ${cuteDate(dateToDMY(validatedA.parsedDate))})`
-            }
-          }
-
-          lines.push(`▫️ ${a.first_name || 'Unassigned'}${resp} ${due} ${status}`.trim())
+          lines.push(`📝 ${a.first_name}\n${status}${resp}${due}\n\n`.trim())
         }
       }
 
