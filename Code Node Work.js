@@ -12,6 +12,18 @@ const currMemberID = $('Get User Details').first().json.uid // this means 5 digi
 let currState = peekState(session)
 
 if (processing_flag == true) {
+  // If the user gave cancel command then quit the flow and inform the user
+  if (String(currInput).trim().toLowerCase().replace('/', '') == 'cancel') {
+    const newStateStack = replaceTopState(session, 'session_ended')
+    return [
+      updateSessionQuery('User cancelled session', newStateStack, `'{}'::jsonb`, false),
+      telegramMessage(
+        'User chose to cancel session',
+        'This session has been terminated.\nFeel free to start a new session 😃'
+      ),
+    ]
+  }
+
   // 🌸 Start of the divine state based routing
 
   // State: new_session
@@ -1896,10 +1908,20 @@ if (processing_flag == true) {
       `🌻 ${currUserName},\nPlease enter a command from the list below:\n\n` +
       `👥 Clients\n` +
       `/addC\nAdd a new client\n` +
+      `/deleteC\nDelete an existing client\n` +
+      `/viewC\nView all clients\n` +
       `\n\n📋 Tasks\n` +
-      `/assignT\nAssign an existing task to a team member\n` +
+      `/deleteT\nDelete an existing task\n` +
       `\n\n👤 Members\n` +
-      `\n\n🌈 More coming soon...`
+      `/addM\nAdd a new team member\n` +
+      `/updateM\nUpdate an existing team member's details\n` +
+      `/deleteM\nDelete an existing team member\n` +
+      `/viewM\nView all team members\n` +
+      `\n\n🗃 Miscellaneous\n` +
+      `/sendT\nSend a team member's tasks to them\n` +
+      `/genR\nGenerate a report of the current task list\n` +
+      `/backT\nBack up all the current task list data\n`
+
     return [
       telegramMessage('Present list of other commands to user', message),
       updateSessionQuery(
@@ -2430,13 +2452,14 @@ function getNextStateFromInput(input, currRole) {
   const mapping = {
     '➕ Add Task': 'add_task_started',
     '🔍 View Tasks': 'view_tasks_started',
-    '✏️Update Task': 'update_task_started',
+    '✏️ Update Task': 'update_task_started',
     '📤 Send Tasks': 'send_tasks_started',
-    '📊 Generate Report': 'generate_report_started',
-    '🗂️ Backup': 'backup_started',
+    '📝 Assign Existing Task': 'assign_task_started',
+    '✏️Update Assignment': 'update_assignment_started',
     '⚙️ Other': 'other_started',
     '🔍 View My Tasks': 'view_my_tasks_started',
-    '✏️Mark Assignment as Complete': 'mark_assignment_as_complete_started',
+    '✏️ Change Assignment Status': 'change_assignment_status_started',
+    '📦 View Inactive Tasks': 'view_inactive_tasks_started',
   }
 
   const key = String(input)
@@ -2459,10 +2482,17 @@ function getOtherCommandNextState(input) {
   /** @type {{ [key: string]: string }} */
   const mapping = {
     '/addC': 'add_client_started',
-    '/assignT': 'assign_task_started',
-    '/deleteC': 'delete_client_started', // placeholder if you add later
-    '/deleteT': 'delete_task_started', // placeholder if you add later
-    '/addM': 'add_member_started', // placeholder if you add later
+    '/deleteC': 'delete_client_started',
+    '/viewC': 'view_clients_started',
+    '/deleteT': 'delete_task_started',
+    '/deleteA': 'delete_assignment_started',
+    '/addM': 'add_member_started',
+    '/updateM': 'update_member_started',
+    '/deleteM': 'delete_member_started',
+    '/viewM': 'view_members_started',
+    '/sendT': 'view_members_started',
+    '/genR': 'generate_report_started',
+    '/backT': 'backup_taskList_started',
   }
 
   // const key = String(input).trim().toLowerCase()
@@ -2873,6 +2903,11 @@ function renderTasksView({ clients, tasks, assignments }) {
         lines.push(`${statusMap[task.status]}`)
       }
 
+      // 📝 If notes exist, display them
+      if (task.notes) {
+        lines.push(`📝 Notes: ${task.notes}`)
+      }
+
       const taskAssignments = assignments.filter((a) => a.task_uid === task.uid)
       if (taskAssignments.length) {
         lines.push(`\n👥 Assignments:`)
@@ -2881,7 +2916,8 @@ function renderTasksView({ clients, tasks, assignments }) {
           const due = a.due ? `\n📅 ${a.due})` : ''
           const status = statusMap[a.status] || ''
 
-          lines.push(`📝 ${a.first_name}\n${status}${resp}${due}\n\n`.trim())
+          lines.push(`📝 ${a.first_name}\n${status}${resp}${due}`.trim())
+          lines.push('') // Empty line between assignments
         }
       }
 
