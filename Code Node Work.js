@@ -267,8 +267,9 @@ if (processing_flag == true) {
       `Please share the task details in *Key:Value* format.\n\nFor example:\n\n` +
       `*title*: Follow up with vendor\n` +
       `*due*: 22-06-25\n` +
-      `*priority*: High\n\n` +
-      `The due date must be either in DD-MM-YY format or a day of the week.\n` +
+      `*priority*: High\n` +
+      `*notes*: Have to follow up with the vendor for photoshoot updates and inform the team\n\n` +
+      `The due date can be either in DD-MM-YY format, a day of the week, today, or tomorrow.\n` +
       `The priority can be low, medium, high, or urgent.\n\n` +
       `🌼 Only *title* is required — the rest are optional and can be edited anytime.\n\n` +
       `Take your time. I'm right here when you're ready ✨`
@@ -1021,7 +1022,7 @@ if (processing_flag == true) {
   // 🌼 Ask user for assignment-specific details or /skip
   // Separated from assign_task_selectedMember so that if user enters details incorrectly,
   // we just ask again and the member validation bit doesn't happen
-  // Next state stack: ..., assign_task_receivedAssignmentDetails
+  // Next state stack: ..., assign_task_confirmAssignmentDetails
   if (currState === 'assign_task_askForAssignmentDetails') {
     // 🌼 Ask user for assignment-specific details
     const detailsMessage =
@@ -1033,12 +1034,12 @@ if (processing_flag == true) {
       `(resp - short for responsibility)\n\n` +
       `🌱 You can type any or all. To skip, simply click here → */skip*.`
 
-    const newStateStack = replaceTopState(session, 'assign_task_receivedAssignmentDetails')
+    const newStateStack = replaceTopState(session, 'assign_task_confirmAssignmentDetails')
 
     return [
       telegramMessage('Asking user for assignment-specific details', detailsMessage),
       updateSessionQuery(
-        `Asked user to enter assignment details. Moving to assign_task_receivedAssignmentDetails`,
+        `Asked user to enter assignment details. Moving to assign_task_confirmAssignmentDetails`,
         newStateStack,
         context,
         false
@@ -1047,12 +1048,12 @@ if (processing_flag == true) {
   }
 
   // 🌸 Flow: Assign an existing task
-  // State: assign_task_receivedAssignmentDetails
+  // State: assign_task_confirmAssignmentDetails
   // Validate the assignment details entered by the user or /skip.
   // Insert the assignment details into context_data
   // Ask the user to confirm assignment
   // Next state stack: ..., assign_task_validatedAssignmentDetails
-  if (currState === 'assign_task_receivedAssignmentDetails') {
+  if (currState === 'assign_task_confirmAssignmentDetails') {
     const assignmentDetailsInput = String(currInput).trim()
 
     const newStateStack = pushState(
@@ -1064,10 +1065,6 @@ if (processing_flag == true) {
     const selectedClient = context.assign_task.selected_client
     const selectedMember = context.assign_task.selected_member
 
-    const taskDue = selectedTask.due_date ? cuteDate(YYMDtoDMY(selectedTask.due_date)) : null
-    const taskPriority = selectedTask.priority
-    const taskStatus = selectedTask.status
-
     // 🧚 If user skipped input
     if (assignmentDetailsInput.toLowerCase() === '/skip') {
       const previewText = renderTasksView({
@@ -1077,9 +1074,10 @@ if (processing_flag == true) {
             uid: selectedTask.uid,
             client_uid: selectedTask.client_uid,
             title: selectedTask.title,
-            priority: taskPriority,
-            due: taskDue,
-            status: taskStatus,
+            priority: selectedTask.priority,
+            due: selectedTask.due_date ? cuteDate(YYMDtoDMY(selectedTask.due_date)) : null,
+            status: selectedTask.status,
+            notes: selectedTask.notes,
           },
         ],
         assignments: [
@@ -1093,7 +1091,7 @@ if (processing_flag == true) {
       // 🌸 Add confirmation instructions
       const confirmMessage =
         previewText +
-        `\n\n🌿 No extra assignment details provided.\nDefault values will be used.\n\n` +
+        `\n\n\n🌿 No extra assignment details provided.\nDefault values will be used.\n\n` +
         `✅\tClick */yes* to confirm assignment.\n🚫\tClick */no* to re-enter.`
 
       return [
@@ -1149,8 +1147,8 @@ if (processing_flag == true) {
       const revertStateStack = replaceTopState(session, 'assign_task_askForAssignmentDetails')
       return [
         telegramMessage(
-          `Invalid due date. Reason: ${dateValidation.reason}`,
-          `📅 The due date "${data.due}" isn't valid.\n${dateValidation.reason}`
+          `Invalid due date.\nReason: ${dateValidation.reason}`,
+          `📅 The due date "${data.due}" isn't valid.\nReason: ${dateValidation.reason}`
         ),
         updateSessionQuery(`Invalid due date`, revertStateStack, context, true),
       ]
@@ -1175,9 +1173,10 @@ if (processing_flag == true) {
           uid: selectedTask.uid,
           client_uid: selectedTask.client_uid,
           title: selectedTask.title,
-          priority: taskPriority,
-          due: taskDue,
-          status: taskStatus,
+          priority: selectedTask.priority,
+          due: selectedTask.due_date ? cuteDate(YYMDtoDMY(selectedTask.due_date)) : null,
+          status: selectedTask.status,
+          notes: selectedTask.notes,
         },
       ],
       assignments: [
@@ -1185,7 +1184,8 @@ if (processing_flag == true) {
           task_uid: selectedTask.uid,
           first_name: selectedMember.first_name,
           resp: data.resp,
-          due: data.due,
+          due: cuteDate(dateToDMY(dateValidation.parsedDate)),
+          priority: data.priority,
         },
       ],
     })
@@ -2542,7 +2542,7 @@ function validateTaskDetails(data) {
     }
   }
 
-  const allowedKeys = ['title', 'due', 'priority', 'status']
+  const allowedKeys = ['title', 'due', 'priority', 'status', 'notes']
   const invalidKeys = Object.keys(data).filter((k) => !allowedKeys.includes(k))
 
   if (invalidKeys.length > 0) {
@@ -2914,9 +2914,9 @@ function renderTasksView({ clients, tasks, assignments }) {
         for (const a of taskAssignments) {
           const resp = a.resp ? ` → "${a.resp}"` : ''
           const due = a.due ? `\n📅 ${a.due})` : ''
-          const status = statusMap[a.status] || ''
-
-          lines.push(`📝 ${a.first_name}\n${status}${resp}${due}`.trim())
+          const priority = a.priority ? `\n⚡ ${capitalize(a.priority)}` : ''
+          const status = a.status ? `\n${statusMap[a.status]}` : ''
+          lines.push(`📝 ${a.first_name}${resp}${due}${priority}${status}`.trim())
           lines.push('') // Empty line between assignments
         }
       }
