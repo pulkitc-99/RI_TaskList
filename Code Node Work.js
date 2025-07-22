@@ -1,9 +1,39 @@
+const currUserID = $('Trigger upon receiving telegram message').first().json.message.from.id // this means telegram ID
+const sessionData = $('Updated Session').first().json;
+
+// First we check if the track_session table returned empty data for the given telegram_id which means the user is new
+// If it is empty then create a new row for them, and then proceed to state based logic
+if (!sessionData || Object.keys(sessionData).length === 0 || !sessionData.telegram_id) {
+  return [
+    {
+      // Add new row in track_session table
+      json: {
+        route: 'postgresNode',
+        info: 'Inserting new row for new user into DB table track_session',
+        query: String(`INSERT INTO track_session (telegram_id) VALUES ('${currUserID}');`.trim()),
+      },
+    },
+    // Inform the user that the task is added and ask for optional assignments
+    telegramMessage(
+      'Informing that this user is new and adding their row',
+      `Welcome! You are now registered. Please continue.`
+    ),
+    updateSessionQuery(
+      'Ensure state is logged_out and context_data is empty',
+      ['logged_out'],
+      {}, // this will stringify to `'{}'::jsonb`
+      true,
+      currUserID
+    ),
+  ]
+}
+
 // 📦 Extract commonly used session & user details from previous nodes
 const session = $('Updated Session').first().json.state
 const context = $('Updated Session').first().json.context_data || {}
 const processing_flag = $('Updated Session').first().json.processing_flag
 const currInput = $('Trigger upon receiving telegram message').first().json.message.text
-const currUserID = $('Trigger upon receiving telegram message').first().json.message.from.id // this means telegram ID
+
 const currUserName = $('Get User Details').first().json.first_name
 const currRole = $('Get User Details').first().json.role
 const currMemberID = $('Get User Details').first().json.uid // this means 5 digit member ID
@@ -14,7 +44,7 @@ let currState = peekState(session)
 if (processing_flag == true) {
   // If the user gave cancel command then quit the flow and inform the user
   if (String(currInput).trim().toLowerCase().replace('/', '') == 'cancel') {
-    const newStateStack = replaceTopState(session, 'session_ended')
+    const newStateStack = ['session_ended']
     return [
       updateSessionQuery('User cancelled session', newStateStack, `'{}'::jsonb`, false),
       telegramMessage(
@@ -157,7 +187,8 @@ if (processing_flag == true) {
     return [
       telegramMessage(`Sending list of clients to user and asking for selection`, message),
       updateSessionQuery(
-        `Client List fetched. The user shall select a client. Updating state from add_task_retrievedClients to add_task_checkSelectedClient`,
+        `Client List fetched. The user shall select a client. Updating state` +
+          ` from add_task_retrievedClients to add_task_checkSelectedClient`,
         newStateStack,
         context,
         false
@@ -546,11 +577,11 @@ if (processing_flag == true) {
                 '{assign_task}',
                 jsonb_build_object(
                   'selected_task', jsonb_build_object(
-                    'uid', '${selectedTask.uid}',
-                    'title', '${selectedTask.title}',
+                    'uid', ${selectedTask.uid ? `'${selectedTask.uid}'` : 'null'},
+                    'title', ${selectedTask.title ? `'${selectedTask.title}'` : 'null'},
                     'due_date', ${selectedTask.due_date ? `'${selectedTask.due_date}'` : 'null'},
-                    'priority', '${selectedTask.priority}',
-                    'client_uid', '${selectedTask.client_uid}'
+                    'priority', ${selectedTask.priority ? `'${selectedTask.priority}'` : 'null'},
+                    'client_uid', ${selectedTask.client_uid ? `'${selectedTask.client_uid}'` : 'null'},
                   ),
                   'selected_client', jsonb_build_object(
                     'uid', '${selectedClient.uid}',
@@ -1065,6 +1096,11 @@ if (processing_flag == true) {
     const selectedClient = context.assign_task.selected_client
     const selectedMember = context.assign_task.selected_member
 
+    let due = null
+
+    if (selectedTask.due_date && selectedTask.due_date !== 'undefined')
+      due = cuteDate(YYMDtoDMY(selectedTask.due_date))
+
     // 🧚 If user skipped input
     if (assignmentDetailsInput.toLowerCase() === '/skip') {
       const previewText = renderTasksView({
@@ -1075,7 +1111,7 @@ if (processing_flag == true) {
             client_uid: selectedTask.client_uid,
             title: selectedTask.title,
             priority: selectedTask.priority,
-            due: selectedTask.due_date ? cuteDate(YYMDtoDMY(selectedTask.due_date)) : null,
+            due: due,
             status: selectedTask.status,
             notes: selectedTask.notes,
           },
@@ -1276,7 +1312,7 @@ if (processing_flag == true) {
       member_uid,
       assigned_by,
       status,
-      responsibility,
+      resp,
       due_date,
       priority
     )
@@ -1575,7 +1611,7 @@ if (processing_flag == true) {
 
       const msg =
         `📅 Please enter a *due date* to filter by:\n\n` +
-        `Format options:\n• DD-MM-YY\n→ like ${ddmmyy}\n\n• Day of week\n→ like ${weekday}\n\n• Or use /today or /tomorrow`
+        `Format options:\n• DD-MM-YY\n→ like ${ddmmyy}\n\n• Day of week\n→ like ${weekday}\n\n• /today or /tomorrow`
 
       return [
         telegramMessage(`Prompting for due date filter`, msg),
@@ -1761,6 +1797,8 @@ if (processing_flag == true) {
     ]
   }
 
+  // TODO Add a state here that outputs the data to the google sheet as well before showing it in telegram
+
   // 🌸 Flow: Viewing Tasks
   // State: view_tasks_showTasks
   // Filter is good and validated, now we shall filter the
@@ -1898,6 +1936,528 @@ if (processing_flag == true) {
     ]
   }
 
+  // 🌸 Flow: Updating a task
+  // State: update_task_started
+  // User wants to update a task. Fetch all data and store it in update_task
+  // Next state stack: ..., update_task_clientSelected, fetch_members, fetch_tasks, fetch_clients, fetch_assignments
+  if (currState === 'update_task_started') {
+    const newStateStack = pushState(
+      pushState(
+        pushState(
+          pushState(replaceTopState(session, 'update_task_askToSelectClient'), 'fetch_members'),
+          'fetch_tasks'
+        ),
+        'fetch_clients'
+      ),
+      'fetch_assignments'
+    )
+
+    const contextDataSQL = `
+      jsonb_set(
+        jsonb_set(
+          jsonb_set(
+            jsonb_set(
+              jsonb_set(
+                coalesce(context_data, '{}'::jsonb),
+                '{update_task}',
+                '{}'::jsonb,
+                true
+              ),
+              '{fetch_assignments}',
+              jsonb_build_object('caller', 'update_task'),
+              true
+            ),
+            '{fetch_clients}',
+            jsonb_build_object('caller', 'update_task'),
+            true
+          ),
+          '{fetch_tasks}',
+          jsonb_build_object('caller', 'update_task'),
+          true
+        ),
+        '{fetch_members}',
+        jsonb_build_object('caller', 'update_task'),
+        true
+      )
+    `
+
+    return [
+      updateSessionQuery(
+        'Updating a task flow started - fetching all data',
+        newStateStack,
+        contextDataSQL,
+        true
+      ),
+    ]
+  }
+
+  // 🌸 Flow: Updating a task
+  // State: update_task_askToSelectClient
+  // Ask the user to select the client to which the task belongs to
+  // Next state: update_task_clientSelected
+  if (currState === 'update_task_askToSelectClient') {
+    const newStateStack = replaceTopState(session, 'update_task_clientSelected')
+
+    // 🌼 Extract client list and task list from context_data
+    const clientList = Array.isArray(context.update_task.client_list)
+      ? context.update_task.client_list
+      : []
+
+    const taskList = Array.isArray(context.update_task.task_list)
+      ? context.update_task.task_list
+      : []
+
+    // 🌼 Build a Set of client UIDs who have tasks
+    const clientsWithTasks = new Set(
+      taskList
+        .filter((task) => task.status === 'pending' || task.status === 'review')
+        .map((task) => task.client_uid)
+    )
+
+    // 🌼 Filter the clients to only those with at least one task
+    const filteredClientList = clientList.filter((client) => clientsWithTasks.has(client.uid))
+
+    // 🌼 Sort the filtered list by client name
+    const sortedClientList = filteredClientList.sort((a, b) => a.name.localeCompare(b.name))
+
+    const clientText = sortedClientList
+      .map((client) => `🔹 ${client.name} (/${client.uid})`)
+      .join('\n')
+
+    const message = `🌷 ${currUserName},\n` + `Please select a client:\n\n${clientText}\n\n`
+
+    // TODO Add the below text into /help telegram message
+    // `👉 Click on the client's UID displayed next to their name.\n\n` +
+    // `Note: Only the clients having at least one active task have been displayed.`
+
+    return [
+      telegramMessage(
+        `Sending filtered list of clients who have active tasks to user and asking for selection`,
+        message
+      ),
+      updateSessionQuery(`State: update_task_askToSelectClient`, newStateStack, context, false),
+    ]
+  }
+
+  // 🌸 Flow: Updating a task
+  // State: update_task_clientSelected
+  // Check the selected client and update context_data
+  // Next state: update_task_askToSelectTask
+  if (currState === 'update_task_clientSelected') {
+    const clientInput = String(currInput).trim().toLowerCase().replace('/', '')
+
+    // Fetch client list and check whether entered client exists in the database
+    const clientList = Array.isArray(context.update_task.client_list)
+      ? context.update_task.client_list
+      : []
+
+    const foundClient = clientList.find(
+      (client) => client.uid.toLowerCase() === clientInput.toLowerCase()
+    )
+
+    // If invalid client UID was entered, inform the user and show the client list once again
+    if (!foundClient) {
+      const revertStateStack = replaceTopState(session, 'update_task_askToSelectClient')
+      return [
+        telegramMessage(
+          'Client not found — prompting user to try again',
+          `⚠️ Hmm... I couldn't find a client with that UID.\nPlease try again. 🌼`
+        ),
+        updateSessionQuery(
+          `Invalid client input, reverting to update_task_askToSelectClient`,
+          revertStateStack,
+          context,
+          true
+        ),
+      ]
+    }
+
+    // Client UID verified, store the selected client's details and remove client list from
+    const newStateStack = replaceTopState(session, 'update_task_askToSelectTask')
+    return [
+      updateSessionQuery(
+        `Client ${foundClient.name} selected — saving in context_data and moving to update_task_askToSelectTask`,
+        newStateStack,
+        // We remove client_list and add selected_client
+        `
+          jsonb_strip_nulls(
+            jsonb_set(
+              jsonb_set(
+                context_data,
+                '{update_task,client_list}',
+                'null'::jsonb,
+                true
+              ),
+              '{update_task,selected_client}',
+              jsonb_build_object('uid', '${ess(foundClient.uid)}', 'name', '${ess(foundClient.name)}'),
+              true
+            )
+          )
+        `,
+        true
+      ),
+      telegramMessage(
+        `tell wonderful after selecting client to make the user feel like a star`,
+        `✨ Wonderful!`
+      ),
+    ]
+  }
+
+  // 🌸 Flow: Updating a task
+  // State: update_task_askToSelectTask
+  // Ask the user to select one of the tasks of the selected client
+  // Next state: update_task_taskSelected
+  if (currState === 'update_task_askToSelectTask') {
+    const newStateStack = replaceTopState(session, 'update_task_taskSelected')
+
+    // 🌼 Extract task list from context_data
+    const taskList = Array.isArray(context.update_task.task_list)
+      ? context.update_task.task_list
+      : []
+
+    // 🌼 Extract selected client UID to filter tasks for that client
+    const selectedClientUID = context.update_task.selected_client.uid
+
+    // 🌼 Filter active tasks belonging to selected client
+    const filteredTaskList = taskList
+      .filter((task) => task.client_uid.toLowerCase() === selectedClientUID.toLowerCase())
+      .filter((task) => task.status === 'pending' || task.status === 'review')
+
+    // 🌼 Sort filtered tasks by title
+    const sortedTaskList = filteredTaskList.sort((a, b) => a.title.localeCompare(b.title))
+
+    // 🌼 Prepare task display text
+    const taskText = sortedTaskList.map((task) => `🔹 ${task.title} (/${task.uid})`).join('\n')
+
+    // 🌼 Prepare message for user
+    const message =
+      `Please choose the task you wish to assign:\n\n${taskText}\n\n` +
+      `👉 Click on the task's UID displayed next to its title.`
+
+    return [
+      telegramMessage(`Sending list of tasks to user and asking for selection`, message),
+      updateSessionQuery(
+        `State: update_task_askToSelectTask. Filtered task list for ` +
+          `client UID ${selectedClientUID}. Awaiting user's task selection.`,
+        newStateStack,
+        context,
+        false
+      ),
+    ]
+  }
+
+  // 🌸 Flow: Updating a task
+  // State: update_task_taskSelected
+  // Check the selected task and update context_data
+  // Next state: update_task_askToEnterDetails
+  if (currState === 'update_task_taskSelected') {
+    // Convert the entered task UID to lowercase and strip '/' symbol for comparison
+    const taskInput = String(currInput).trim().toLowerCase().replace('/', '')
+
+    const taskList = Array.isArray(context.update_task.task_list)
+      ? context.update_task.task_list
+      : []
+
+    // Filter tasks belonging to the selected client
+    const filteredTaskList = taskList.filter(
+      (task) =>
+        task.client_uid.toLowerCase() === context.update_task.selected_client.uid.toLowerCase()
+    )
+
+    // Try to find task with matching UID
+    const selectedTask = filteredTaskList.find(
+      (task) => task.uid.toLowerCase() === taskInput.toLowerCase()
+    )
+
+    // If task is not found, ask user to re-enter
+    if (!selectedTask) {
+      const revertStateStack = replaceTopState(session, `update_task_askToSelectTask`)
+      return [
+        telegramMessage(
+          'Invalid task UID entered',
+          `❌ That doesn't seem like a valid task UID.\nPlease click on a task's UID from the list.`
+        ),
+        updateSessionQuery(
+          `Invalid client input, reverting to update_task_askToSelectTask`,
+          revertStateStack,
+          context,
+          true
+        ),
+      ]
+    }
+
+    // Task verified, update context data and proceed
+    return [
+      updateSessionQuery(
+        `Task selected (${selectedTask.uid}). Pushing fetch_members to fetch team list.`,
+        replaceTopState(session, 'update_task_askToEnterDetails'),
+        `
+          jsonb_strip_nulls(
+            jsonb_set(
+              jsonb_set(
+                context_data,
+                '{update_task,task_list}',
+                'null'::jsonb,
+                true
+              ),
+              '{update_task,selected_task}',
+              jsonb_build_object(
+                'uid', ${ess(selectedTask.uid)},
+                'notes', ${ess(selectedTask.notes)},
+                'client_uid', ${ess(selectedTask.client_uid)},
+                'title', ${ess(selectedTask.title)},
+                'due_date', ${ess(selectedTask.due_date)},
+                'created_by', ${ess(selectedTask.created_by)},
+                'created_at', ${ess(selectedTask.created_at)},
+                'status', ${ess(selectedTask.status)},
+                'priority', ${ess(selectedTask.priority)},
+              ),
+              true
+            ),
+          )
+        `,
+        true
+      ),
+    ]
+  }
+
+  // 🌸 Flow: Updating a task
+  // State: update_task_askToEnterDetails
+  // Show the user the current task card and ask for new details
+  // Give quick command to mark task as complete
+  // Next state: update_task_validateNewDetails
+  if (currState === 'update_task_askToEnterDetails') {
+    const newStateStack = replaceTopState(session, 'update_task_validateNewDetails')
+
+    // Prepare Message to send to user - asking to enter task details with an example
+    const taskMessage =
+      `Click */here* to mark the task as completed.\n\n` +
+      `Else, please share the updated task details in *Key:Value* format.\n\n` +
+      `For example:\n\n` +
+      `*title*: Follow up with vendor\n` +
+      `*due*: 22-06-25\n` +
+      `*priority*: high\n` +
+      `*status*: review\n` +
+      `*notes*: Have to follow up with the vendor for photoshoot updates and inform the team\n\n`
+
+    // TODO Make the following into help message info - include valid values for status, priority etc.
+    // `The due date can be either in DD-MM-YY format, a day of the week, today, or tomorrow.\n` +
+    // `The priority can be low, medium, high, or urgent.\n\n` +
+    // `🌼 Only *title* is required — the rest are optional and can be edited anytime.\n\n` +
+    // `Take your time. I'm right here when you're ready ✨`
+
+    return [
+      telegramMessage(`Asking user for updated task details`, taskMessage),
+      updateSessionQuery(`Asking user for updated task details`, newStateStack, context, false),
+    ]
+  }
+
+  // 🌸 Flow: Updating a task
+  // State: update_task_validateNewDetails
+  // Validate the new details entered
+  // Next state: update_task_updateTable
+  if (currState === 'update_task_validateNewDetails') {
+    const taskText = String(currInput).trim()
+
+    // If the user wants to just mark the task as done, update context data and proceed
+    if (taskText.toLowerCase().replace('/', '') === 'done')
+      return [
+        updateSessionQuery(
+          `update_task_updateTable: Saving updated task details into the table.`,
+          replaceTopState(session, 'update_task_updateTable'),
+          `jsonb_set(
+            context_data,
+            '{add_task, update_intention}',
+            'mark_as_done'::jsonb),
+            true
+          )`,
+          true
+        ),
+      ]
+
+    const selectedClient = context.update_task.selected_client
+
+    // 🌿 Parse key:value input using helper function
+    const parsedResult = parseTaskDetails(taskText)
+
+    // If the input is not correct, then inform the user and try again.
+    if (!parsedResult.success) {
+      const revertStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
+      return [
+        telegramMessage(parsedResult.info, parsedResult.message),
+        updateSessionQuery(parsedResult.info, revertStateStack, context, true),
+      ]
+    }
+
+    // Test the parsed result for further validation
+    const taskData = parsedResult.data
+    const validation = validateTaskDetails(taskData)
+
+    if (!validation.valid) {
+      const revertStateStack = replaceTopState(session, 'add_task_askForTaskDetails')
+
+      return [
+        telegramMessage(validation.info, validation.message),
+        updateSessionQuery(validation.info, revertStateStack, context, true),
+      ]
+    }
+
+    const newStateStack = replaceTopState(session, 'add_task_verifiedTaskDetails')
+
+    // Prepare task with client card to send to user asking to confirm insertion.
+    const previewText = renderTasksView({
+      clients: [{ uid: selectedClient.uid, name: selectedClient.name }],
+      tasks: [
+        {
+          client_uid: selectedClient.uid,
+          title: taskData.title,
+          priority: taskData.priority ? `${taskData.priority}` : '',
+          due: validation.dueDate ? `${cuteDate(validation.dueDate)}` : '',
+        },
+      ],
+      assignments: [],
+    })
+
+    // 🌸 Add confirmation instructions
+    const confirmMessage =
+      previewText +
+      `\n\n👥 —\n\n` +
+      `If this looks good,\n✅ Click */yes* to confirm, or\n` +
+      `🚫 Click */no* to enter task details again.`
+
+    return [
+      telegramMessage(
+        'Confirming task details with user (yes/no) in formatted client card style',
+        confirmMessage
+      ),
+      updateSessionQuery(
+        `add_task_receivedTaskDetails: Saving task details into context_data. ` +
+          `Asking user if task is okay to be entered, and proceeding to updage_task_verifiedDetails`,
+        newStateStack,
+        `jsonb_set(
+          context_data,
+          '{add_task, task_details}',
+          to_jsonb('${JSON.stringify(taskData)}'::json),
+          true
+        )`,
+        false
+      ),
+    ]
+  }
+
+  // 🌸 Flow: Updating a task
+  // State: update_task_updateTable
+  // Update the table in the database
+  // Next state: update_task_taskUpdated
+  if (currState === 'update_task_updateTaskDetails') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating a task
+  // State: update_task_taskUpdated
+  // Inform the user that the task has been updated
+  // Show the new task card and pop
+  // Pop state
+  if (currState === 'update_task_taskUpdated') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_started
+  // User wants to update an assignment. Fetch all data and store it in update_assignment
+  // Next state stack: ..., update_assignment_dataFetched, fetch_members, fetch_tasks, fetch_clients, fetch_assignments
+  if (currState === 'update_assignment_started') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_dataFetched
+  // Data fetched, go to next state
+  // Next state: update_assignment_askToSelectClient
+  if (currState === 'update_assignment_dataFetched') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_askToSelectClient
+  // Ask to select client to whom the assignment's task belongs to
+  // Next state: update_assignment_clientSelected
+  if (currState === 'update_assignment_askToSelectClient') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_clientSelected
+  // Validate selected client
+  // Next state: update_assignment_askToSelectTask
+  if (currState === 'update_assignment_clientSelected') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_askToSelectTask
+  // Ask to select the task that the assignment belongs to
+  // Next state: update_assignment_taskSelected
+  if (currState === 'update_assignment_askToSelectTask') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_taskSelected
+  // Validate selected task
+  // Next state: update_assignment_askToSelectAssignment
+  if (currState === 'update_assignment_taskSelected') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_askToSelectAssignment
+  // Ask to select assignment to be updated
+  // Next state: update_assignment_assignmentSelected
+  if (currState === 'update_assignment_askToSelectAssignment') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_assignmentSelected
+  // Validated selected assignment
+  // Next state: update_assignment_askToEnterDetails
+  if (currState === 'update_assignment_assignmentSelected') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_askToEnterDetails
+  // Ask to enter new assignment details, quick option for mark it as completed
+  // Next state: update_assignment_validateNewDetails
+  if (currState === 'update_assignment_askToEnterDetails') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_validateNewDetails
+  // Validate new details
+  // Next state: update_assignment_updateAssignmentDetails
+  if (currState === 'update_assignment_validateNewDetails') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_updateAssignmentDetails
+  // Enter new assignment details into the database
+  // Next state: update_assignment_assignmentUpdated
+  if (currState === 'update_assignment_updateAssignmentDetails') {
+    // TODO
+  }
+
+  // 🌸 Flow: Updating an assignment
+  // State: update_assignment_assignmentUpdated
+  // Inform user, show new card and exit
+  // Next state: pop
+  if (currState === 'update_assignment_assignmentUpdated') {
+    // TODO
+  }
+
   // 🌸 Flow: Asking what user wants to do when selected other
   // State: other_started
   // Present all options to user and ask what they would like to do
@@ -1908,19 +2468,18 @@ if (processing_flag == true) {
       `🌻 ${currUserName},\nPlease enter a command from the list below:\n\n` +
       `👥 Clients\n` +
       `/addC\nAdd a new client\n` +
-      `/deleteC\nDelete an existing client\n` +
-      `/viewC\nView all clients\n` +
+      `deleteC\nDelete an existing client\n` +
+      `viewC\nView all clients\n` +
       `\n\n📋 Tasks\n` +
-      `/deleteT\nDelete an existing task\n` +
+      `deleteT\nDelete an existing task\n` +
       `\n\n👤 Members\n` +
-      `/addM\nAdd a new team member\n` +
-      `/updateM\nUpdate an existing team member's details\n` +
-      `/deleteM\nDelete an existing team member\n` +
-      `/viewM\nView all team members\n` +
+      `addM\nAdd a new team member\n` +
+      `updateM\nUpdate an existing team member's details\n` +
+      `deleteM\nDelete an existing team member\n` +
+      `viewM\nView all team members\n` +
       `\n\n🗃 Miscellaneous\n` +
-      `/sendT\nSend a team member's tasks to them\n` +
-      `/genR\nGenerate a report of the current task list\n` +
-      `/backT\nBack up all the current task list data\n`
+      `sendT\nSend a team member's tasks to them\n` +
+      `backT\nBack up all the current task list data\n`
 
     return [
       telegramMessage('Present list of other commands to user', message),
@@ -2204,6 +2763,9 @@ if (processing_flag == true) {
     ]
   }
 
+  // 🌸 Flow: Login/Logout
+  // State: 
+
   // 🌸 Subflow: fetching all clients details from the database
   // State: fetch_clients
   // Pop the stack after this is complete
@@ -2270,7 +2832,8 @@ if (processing_flag == true) {
                         'due_date', due_date,
                         'created_by', created_by,
                         'status', status,
-                        'created_at', created_at
+                        'created_at', created_at,
+                        'notes', notes
                       )
                     )
                     FROM tasks
@@ -2365,10 +2928,11 @@ if (processing_flag == true) {
                         'due_date', due_date,
                         'task_uid', task_uid,
                         'member_uid', member_uid,
-                        'resp', responsibility,
+                        'resp', resp,
                         'uid', uid,
                         'status', status,
                         'assigned_by', assigned_by,
+                        'assigned_at', assigned_at,
                         'priority', priority
                       )
                     )
@@ -2453,9 +3017,8 @@ function getNextStateFromInput(input, currRole) {
     '➕ Add Task': 'add_task_started',
     '🔍 View Tasks': 'view_tasks_started',
     '✏️ Update Task': 'update_task_started',
-    '📤 Send Tasks': 'send_tasks_started',
     '📝 Assign Existing Task': 'assign_task_started',
-    '✏️Update Assignment': 'update_assignment_started',
+    '✏️ Update Assignment': 'update_assignment_started',
     '⚙️ Other': 'other_started',
     '🔍 View My Tasks': 'view_my_tasks_started',
     '✏️ Change Assignment Status': 'change_assignment_status_started',
@@ -2706,11 +3269,11 @@ function dateToDMY(date) {
 }
 
 // 🌸 Convert "DD-MM-YY" → "YYYY-MM-DD" (Postgres format)
-function DMYtoYYMD(ddmmyy) {
-  const [dd, mm, yy] = ddmmyy.split('-').map(Number)
-  const yyyy = 2000 + yy // Assumes 20YY; adjust for Y2K gopis if needed
-  return `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`
-}
+// function DMYtoYYMD(ddmmyy) {
+//   const [dd, mm, yy] = ddmmyy.split('-').map(Number)
+//   const yyyy = 2000 + yy // Assumes 20YY; adjust for Y2K gopis if needed
+//   return `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`
+// }
 
 // 🌸 Convert "YYYY-MM-DD" → "DD-MM-YY"
 function YYMDtoDMY(yyyymmdd) {
@@ -2719,23 +3282,24 @@ function YYMDtoDMY(yyyymmdd) {
   return `${dd}-${mm}-${yy}`
 }
 
-function validateStatus(givenStatus) {
-  const allowedStatuses = ['pending', 'review', 'done', 'scrapped']
-  if (givenStatus && !allowedStatuses.includes(givenStatus)) {
-    return {
-      valid: false,
-      info: 'Reverting back to add_task_askForTaskDetails because of invalid status',
-      message:
-        `The 📌 *status* "${givenStatus}" is not valid.\n` +
-        `Please choose from: *pending, review, done, scrapped*.`,
-    }
-  }
+// Validate status value
+// function validateStatus(givenStatus) {
+//   const allowedStatuses = ['pending', 'review', 'done', 'scrapped']
+//   if (givenStatus && !allowedStatuses.includes(givenStatus)) {
+//     return {
+//       valid: false,
+//       info: 'Reverting back to add_task_askForTaskDetails because of invalid status',
+//       message:
+//         `The 📌 *status* "${givenStatus}" is not valid.\n` +
+//         `Please choose from: *pending, review, done, scrapped*.`,
+//     }
+//   }
 
-  return {
-    valid: true,
-    info: 'Status entered is valid.',
-  }
-}
+//   return {
+//     valid: true,
+//     info: 'Status entered is valid.',
+//   }
+// }
 
 // We use this function to format DD-MM-YY date into cute format to display to the user
 function cuteDate(ddmmyy) {
@@ -2804,7 +3368,13 @@ function generateUID(prefix, given_uidList) {
 }
 
 // This function takes details to generate an SQL Update Query for track_session, and then returns the object
-function updateSessionQuery(updateInfo, nextStateStack, nextContextData, nextProcessingFlag) {
+function updateSessionQuery(
+  updateInfo,
+  nextStateStack,
+  nextContextData,
+  nextProcessingFlag,
+  telegramID
+) {
   let contextUpdateClause
 
   // Case 1: SQL snippet directly passed (e.g., jsonb_set(...) )
@@ -2835,7 +3405,7 @@ function updateSessionQuery(updateInfo, nextStateStack, nextContextData, nextPro
           ${contextUpdateClause},
           processing_flag = ${nextProcessingFlag},
           last_updated = NOW()
-        WHERE telegram_id = '${currUserID}';
+        WHERE telegram_id = '${telegramID}';
       `.trim(),
     },
   }
@@ -2912,10 +3482,10 @@ function renderTasksView({ clients, tasks, assignments }) {
       if (taskAssignments.length) {
         lines.push(`\n👥 Assignments:`)
         for (const a of taskAssignments) {
-          const resp = a.resp ? ` → "${a.resp}"` : ''
-          const due = a.due ? `\n📅 ${a.due})` : ''
-          const priority = a.priority ? `\n⚡ ${capitalize(a.priority)}` : ''
-          const status = a.status ? `\n${statusMap[a.status]}` : ''
+          const resp = a.resp ? ` → "${a.resp}"` : ``
+          const due = a.due ? `\n📅 ${a.due})` : ``
+          const priority = a.priority ? `\n⚡ ${capitalize(a.priority)}` : ``
+          const status = a.status ? `\n${statusMap[a.status]}` : ``
           lines.push(`📝 ${a.first_name}${resp}${due}${priority}${status}`.trim())
           lines.push('') // Empty line between assignments
         }
@@ -2928,4 +3498,11 @@ function renderTasksView({ clients, tasks, assignments }) {
   }
 
   return lines.join('\n').trim()
+}
+
+// Return correct value for SQL field and escape single quotes
+function ess(value) {
+  if (value == null) return null
+  if (typeof value !== 'string') return `'${value}'`
+  return `'${value.replace(/'/g, "''")}'`
 }
