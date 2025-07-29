@@ -2791,14 +2791,15 @@ if (processing_flag == true) {
       `\n\n📋 Tasks\n` +
       `deleteT\nDelete an existing task\n` +
       `\n\n👤 Members\n` +
-      `addM\nAdd a new team member\n` +
-      `updateM\nUpdate an existing team member's details\n` +
-      `deleteM\nDelete an existing team member\n` +
-      `viewM\nView all team members\n` +
+      `/addM\nAdd a new team member\n` +
+      `/updateM\nUpdate an existing team member's details\n` +
+      `/deleteM\nDelete an existing team member\n` +
+      `/viewM\nView all team members\n` +
       `\n\n🗃 Miscellaneous\n` +
       `sendT\nSend a team member's tasks to them\n` +
       `backT\nBack up all the current task list data\n` +
-      `/logout\nLog out of your RI Task Bot Account\n`
+      `/changePass\nChange your RI Task Bot Account Password\n` +
+      `/logout\nLog out of your RI Task Bot Account`
 
     return [
       telegramMessage('Present list of other commands to user', message),
@@ -3059,7 +3060,7 @@ if (processing_flag == true) {
       `*first_name*: Erika\n` +
       `*role*: employee\n` +
       `*email_id*: erika1234@gmail.com\n\n` +
-      `The role can be either *boss*' or *employee*\n` +
+      `The role can be either *boss* or *employee*\n` +
       `*email_id* is optional`
 
     return [
@@ -3183,7 +3184,7 @@ if (processing_flag == true) {
         true
       )
     `
-    const newStateStack = pushState(session, 'add_member_addToDB')
+    const newStateStack = replaceTopState(session, 'add_member_addToDB')
 
     return [
       updateSessionQuery(
@@ -3220,7 +3221,7 @@ if (processing_flag == true) {
     }
 
     const passwordPrefix = memberDetails.role === 'boss' ? 'owl' : 'bunny'
-    const password = passwordPrefix + memberDetails.first_name
+    const password = passwordPrefix + memberDetails.first_name.toLowerCase()
 
     const memberUIDList = (context.add_member?.member_list || []).map((m) => m.uid)
     const memberUID = generateUID('M', memberUIDList)
@@ -3264,7 +3265,7 @@ if (processing_flag == true) {
         `✅ *New Team Member added successfully!*\n\n` +
           `• 👤 *Name*: ${firstName}\n` +
           `• 🆔 *UID*: ${memberUID}\n` +
-          `• 🔐 *Password*: \`${password}\`\n\n` +
+          `• 🔐 *Password*: ${password}\n\n` +
           `Please share the details with the member.`
       ),
       updateSessionQuery(
@@ -3824,6 +3825,7 @@ function getOtherCommandNextState(input) {
     '/genR': 'generate_report_started',
     '/backT': 'backup_taskList_started',
     '/logout': 'log_out',
+    '/changePass': 'change_password_started',
   }
 
   // const key = String(input).trim().toLowerCase()

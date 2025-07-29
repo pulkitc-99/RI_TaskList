@@ -5,6 +5,9 @@ We shall keep all the states written here for reference and quick access:
 
 MEMBER FLOWS
 
+FLOW: Menu Navigation
+
+
 FLOW: Add a new Member
 add_member_started
 add_member_askForDetails
