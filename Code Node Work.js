@@ -556,9 +556,7 @@ if (processing_flag == true) {
       ? context.add_task.client_list
       : []
 
-    const foundClient = clientList.find(
-      (client) => client.uid.toLowerCase() === clientInput.toLowerCase()
-    )
+    const foundClient = clientList.find((client) => client.uid.toLowerCase() === clientInput)
 
     if (!foundClient) {
       const revertStateStack = replaceTopState(session, 'add_task_retrievedClients')
@@ -3289,10 +3287,41 @@ if (processing_flag == true) {
 
   // 🌸 Flow: Delete a Member
   // State: delete_member_started
-  // Fetch all the task and members details
-  // Next state: delete_member_selectMember
+  // Fetch all the assignments and members details
+  // Next state stack: ..., delete_member_selectMember, fetch_assignments, fetch_members
   if (currState === 'delete_member_started') {
-    // TODO
+    const newStateStack = pushState(
+      pushState(replaceTopState(session, 'delete_member_selectMember'), 'fetch_assignments'),
+      'fetch_members'
+    )
+
+    const contextDataSQL = `
+      jsonb_set(
+        jsonb_set(
+          jsonb_set(
+            coalesce(context_data, '{}'::jsonb),
+            '{delete_member}',
+            '{}'::jsonb,
+            true
+          ),
+          '{fetch_assignments}',
+          jsonb_build_object('caller', 'delete_member'),
+          true
+        ),
+        '{fetch_members}',
+        jsonb_build_object('caller', 'delete_member'),
+        true
+      )`
+
+    return [
+      updateSessionQuery(
+        'Deleting team member - fetching assignment and member details',
+        newStateStack,
+        contextDataSQL,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Delete a Member
@@ -3300,7 +3329,71 @@ if (processing_flag == true) {
   // Show the list of employees and ask whom to delete
   // Next state: delete_member_confirmDeletion
   if (currState === 'delete_member_selectMember') {
-    // TODO
+    const members = context.delete_member?.member_list || []
+    const assignments = context.delete_member?.assignment_list || []
+
+    const activeStatuses = new Set(['pending', 'review'])
+
+    // Build active assignment count per member UID
+    const assignmentCountMap = {}
+    for (const a of assignments) {
+      if (activeStatuses.has(a.status) && a.member_uid) {
+        assignmentCountMap[a.member_uid] = (assignmentCountMap[a.member_uid] || 0) + 1
+      }
+    }
+
+    // Filter out bosses, and build enriched member list with count
+    const deletableMembers = members
+      .filter((m) => m.role === 'employee')
+      .map((m) => ({
+        ...m,
+        activeCount: assignmentCountMap[m.uid] || 0,
+      }))
+      .sort((a, b) => a.first_name.localeCompare(b.first_name)) // Sort by name
+
+    if (deletableMembers.length === 0) {
+      return [
+        telegramMessage(
+          'No deletable members found',
+          `There are no deletable team members at the moment.`
+        ),
+        updateSessionQuery(
+          'No deletable team members available',
+          popState(session),
+          `jsonb_strip_nulls(
+            jsonb_set(
+              coalesce(context_data, '{}'::jsonb),
+              '{delete_member}',
+              'null'::jsonb,
+              true
+            )
+          )`,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    // Prepare message
+    const displayLines = deletableMembers.map(
+      (m) => `• 👤 *${m.first_name}* (/${m.uid}) — 🧮 *${m.activeCount}* active assignments`
+    )
+
+    const displayMessage =
+      displayLines.join('\n') + `\n\nPlease click the *UID* of the member you wish to delete.`
+
+    const newStateStack = replaceTopState(session, 'delete_member_confirmDeletion')
+
+    return [
+      telegramMessage('Showing deletable members list', displayMessage),
+      updateSessionQuery(
+        'Waiting for UID input to confirm deletion',
+        newStateStack,
+        context,
+        false,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Delete a Member
@@ -3308,22 +3401,137 @@ if (processing_flag == true) {
   // Ask for confirmation and tell about active tasks
   // Next state: delete_member_performDeletion
   if (currState === 'delete_member_confirmDeletion') {
-    // TODO
+    const userInput = String(currInput).trim().toLowerCase().replace('/', '')
+    const members = context.delete_member?.member_list || []
+
+    const selectedMember = members.find((m) => m.uid.toLowerCase() === userInput)
+
+    if (!selectedMember) {
+      return [
+        telegramMessage(
+          'Invalid UID',
+          `🚫 I couldn't find a team member with UID *${userInput}*.` +
+            `\nPlease try again by clicking a valid UID from the list.`
+        ),
+      ]
+    }
+
+    const warningMessage =
+      `⚠️ *Warning*\n\nAll active assignments of ${capitalize(selectedMember.first_name)} ` +
+      `will be marked as *scrapped* upon deletion.\n\nAre you sure you want to` +
+      ` delete this member?\n✅ Click */yes* to confirm, or ❌ */no* to cancel.`
+
+    const contextDataSQL = `
+    jsonb_set(
+      coalesce(context_data, '{}'::jsonb),
+      '{delete_member, selected_member_uid}',
+      to_jsonb('${selectedMember.uid}'),
+      true
+    )
+  `.trim()
+
+    const newStateStack = replaceTopState(session, 'delete_member_performDeletion')
+
+    return [
+      telegramMessage('Confirming deletion of team member', warningMessage),
+      updateSessionQuery(
+        'Stored selected member UID and moved to confirmation state',
+        newStateStack,
+        contextDataSQL,
+        false,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Delete a Member
   // State: delete_member_performDeletion
   // Delete the member from the database and mark all their assignments as scrapped
-  // Next state: delete_member_deletedMember
-  if (currState === 'delete_member_performDeletion') {
-    // TODO
-  }
-
-  // 🌸 Flow: Delete a Member
-  // State: delete_member_deletedMember
   // Inform the user and pop
-  if (currState === 'delete_member_deletedMember') {
-    // TODO
+  if (currState === 'delete_member_performDeletion') {
+    const selectedUID = context.delete_member?.selected_member_uid
+
+    if (!selectedUID) {
+      return [
+        telegramMessage(
+          'Missing UID',
+          `❌ Couldn't find which member to delete. Please restart the flow.`
+        ),
+        updateSessionQuery(
+          'Error: UID missing during deletion',
+          popState(session),
+          `jsonb_strip_nulls(
+          jsonb_set(coalesce(context_data, '{}'::jsonb), '{delete_member}', 'null'::jsonb, true)
+        )`,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    const newStateStack = popState(session)
+
+    const SQL1 = `
+    -- 1. Scrap all active assignments of the member
+    UPDATE task_assignments
+    SET status = 'scrapped', member_uid = NULL
+    WHERE member_uid = '${selectedUID}'
+    AND status IN ('pending', 'review');`.trim()
+
+    const SQL2 = `
+    -- 2. Delete the member from team_members
+    DELETE FROM team_members
+    WHERE uid = '${selectedUID}';`.trim()
+
+    const SQL3 = `
+   -- 3. Mark sessions that may belong to this user as logged_out
+    UPDATE track_session
+    SET state = '["logged_out"]'::jsonb,
+        context_data = '{}'::jsonb
+    WHERE muid = '${selectedUID}';`.trim()
+
+    return [
+      {
+        json: {
+          route: 'postgresNode',
+          info: `Marking deleted member's assignments as scrapped`,
+          query: SQL1,
+        },
+      },
+      {
+        json: {
+          route: 'postgresNode',
+          info: 'Deleting member from team_members table',
+          query: SQL2,
+        },
+      },
+      {
+        json: {
+          route: 'postgresNode',
+          info: `Logging out all users logged in to deleted member's account`,
+          query: SQL3,
+        },
+      },
+      telegramMessage(
+        'Member Deleted',
+        `🗑️ Member with UID *${selectedUID}* has been deleted successfully.` +
+          `\nAll their active assignments were marked as *scrapped*.`
+      ),
+      updateSessionQuery(
+        'Resetting state after deletion',
+        newStateStack,
+        `jsonb_strip_nulls(
+        jsonb_set(
+          coalesce(context_data, '{}'::jsonb),
+          '{delete_member}',
+          'null'::jsonb,
+          true
+        )
+      )`,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Update a Member's Details
@@ -3650,13 +3858,12 @@ if (processing_flag == true) {
   // State: fetch_assignments
   // Pop the stack after this is complete
   if (currState === 'fetch_assignments') {
-    const newStateStack = popState(session)
     const caller = context.fetch_assignments?.caller
 
     return [
       updateSessionQuery(
-        `fetch_assignments: Fetching assignments and placing in context_data for caller '${caller}', then cleaning fetch_assignments`,
-        newStateStack,
+        `fetch_assignments: for caller '${caller}', then cleaning fetch_assignments`,
+        popState(session),
         `
         jsonb_strip_nulls(
           jsonb_set(

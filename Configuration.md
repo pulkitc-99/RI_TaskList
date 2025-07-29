@@ -6,7 +6,8 @@ We shall keep all the states written here for reference and quick access:
 MEMBER FLOWS
 
 FLOW: Menu Navigation
-
+other_started
+check_other_command
 
 FLOW: Add a new Member
 add_member_started
@@ -19,5 +20,6 @@ delete_member_started
 delete_member_selectMember
 delete_member_confirmDeletion
 delete_member_performDeletion
-delete_member_deletedMember
+
+
 
