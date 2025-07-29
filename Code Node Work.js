@@ -638,7 +638,7 @@ if (processing_flag == true) {
     const selectedClient = context.add_task.selected_client
 
     // 🌿 Parse key:value input using helper function
-    const parsedResult = parseTaskDetails(taskText)
+    const parsedResult = parseKeyValueInput(taskText)
 
     // If the input is not correct, then inform the user and try again.
     if (!parsedResult.success) {
@@ -1472,7 +1472,7 @@ if (processing_flag == true) {
     }
 
     // 🌿 Parse user input
-    const parsedResult = parseTaskDetails(assignmentDetailsInput)
+    const parsedResult = parseKeyValueInput(assignmentDetailsInput)
     if (!parsedResult.success) {
       const revertStateStack = replaceTopState(session, 'assign_task_askForAssignmentDetails')
       return [
@@ -2596,7 +2596,7 @@ if (processing_flag == true) {
     const selectedClient = context.update_task.selected_client
 
     // 🌿 Parse key:value input using helper function
-    const parsedResult = parseTaskDetails(taskText)
+    const parsedResult = parseKeyValueInput(taskText)
 
     // If the input is not correct, then inform the user and try again.
     if (!parsedResult.success) {
@@ -3018,7 +3018,33 @@ if (processing_flag == true) {
   // Starting to add new member. Fetch all current members' details for reference.
   // Next state stack: ..., add_member_askForDetails, fetch_members
   if (currState === 'add_member_started') {
-    // TODO
+    const newStateStack = pushState(
+      replaceTopState(session, 'add_member_askForDetails'),
+      'fetch_members'
+    )
+
+    const contextDataSQL = `
+      jsonb_set(
+        jsonb_set(
+          coalesce(context_data, '{}'::jsonb),
+          '{add_member}',
+          '{}'::jsonb,
+          true
+        ),
+        '{fetch_members}',
+        jsonb_build_object('caller', 'add_member'),
+        true
+      )`
+
+    return [
+      updateSessionQuery(
+        'Adding new member - fetching details',
+        newStateStack,
+        contextDataSQL,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Add a new Member
@@ -3026,7 +3052,26 @@ if (processing_flag == true) {
   // Ask the user for all the relevant details of the new team member
   // Next state: add_member_checkDetails
   if (currState === 'add_member_askForDetails') {
-    // TODO
+    const newStateStack = replaceTopState(session, 'add_member_checkDetails')
+
+    const Message =
+      `Please share the details of the new team member in *Key:Value* format.\n\nFor example:\n\n` +
+      `*first_name*: Erika\n` +
+      `*role*: employee\n` +
+      `*email_id*: erika1234@gmail.com\n\n` +
+      `The role can be either *boss*' or *employee*\n` +
+      `*email_id* is optional`
+
+    return [
+      telegramMessage(`Asking user for new member details`, Message),
+      updateSessionQuery(
+        `User will enter new member's details now.`,
+        newStateStack,
+        context,
+        false,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Add a new Member
@@ -3034,22 +3079,211 @@ if (processing_flag == true) {
   // Check all entered details and validate the input
   // Next state: add_member_addToDB
   if (currState === 'add_member_checkDetails') {
-    // TODO
+    const memberText = String(currInput).trim()
+    const parsed = parseKeyValueInput(memberText)
+
+    if (!parsed.success) {
+      const newStateStack = replaceTopState(session, 'add_member_askForDetails')
+      return [
+        telegramMessage('User entered no colons in add_member_checkDetails', parsed.message),
+        updateSessionQuery(parsed.info, newStateStack, context, true, currUserTelegramID),
+      ]
+    }
+
+    const data = parsed.data
+
+    // Begin validation
+    const allowedKeys = ['first_name', 'role', 'email_id']
+    const invalidKeys = Object.keys(data).filter((k) => !allowedKeys.includes(k))
+
+    if (invalidKeys.length > 0) {
+      const newStateStack = replaceTopState(session, 'add_member_askForDetails')
+      return [
+        telegramMessage(
+          'User entered unknown fields for member',
+          `Unknown field(s): *${invalidKeys.join(', ')}*.\n\nPlease use only:\n*first_name*, *role*, and *email_id*.`
+        ),
+        updateSessionQuery(
+          'Invalid keys entered while adding member',
+          newStateStack,
+          context,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    // Validate first_name
+    const firstName = data.first_name
+    if (!firstName || !/^[a-zA-Z]+$/.test(firstName)) {
+      const newStateStack = replaceTopState(session, 'add_member_askForDetails')
+      return [
+        telegramMessage(
+          'Invalid first_name for new member',
+          `The *first_name* must be a single word and only contain letters (A-Z).` +
+            `\n\nYou entered: *${firstName || 'nothing'}*.\nPlease try again.`
+        ),
+        updateSessionQuery(
+          'Invalid first_name entered while adding member',
+          newStateStack,
+          context,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    // Validate role if present
+    const role = data.role.toLowerCase()
+    if (!role || (role !== 'boss' && role !== 'employee')) {
+      const newStateStack = replaceTopState(session, 'add_member_askForDetails')
+      return [
+        telegramMessage(
+          'Invalid role for new member',
+          `The *role* must be either *boss* or *employee*.\n\nYou entered: *${role}*.\nPlease try again.`
+        ),
+        updateSessionQuery(
+          'Invalid role entered while adding member',
+          newStateStack,
+          context,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    // Validate email_id if present
+    const email = data.email_id
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      const newStateStack = replaceTopState(session, 'add_member_askForDetails')
+      return [
+        telegramMessage(
+          'Invalid email_id for new member',
+          `The *email_id* you entered is not a valid email.\n\nYou entered: *${email}*\nPlease try again.`
+        ),
+        updateSessionQuery(
+          'Invalid email_id entered while adding member',
+          newStateStack,
+          context,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    const contextDataSQL = `
+      jsonb_set(
+        coalesce(context_data, '{}'::jsonb),
+        '{add_member,new_member_details}',
+        jsonb_build_object(
+          'first_name', '${firstName}',
+          'role', ${role ? `'${role}'` : 'null'},
+          'email_id', ${email ? `'${email}'` : 'null'}
+        ),
+        true
+      )
+    `
+    const newStateStack = pushState(session, 'add_member_addToDB')
+
+    return [
+      updateSessionQuery(
+        'Moving to add_member_addToDB with valid member details',
+        newStateStack,
+        contextDataSQL,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Add a new Member
   // State: add_member_addToDB
   // Add the new member to the database
-  // Next state: add_member_addedMember
+  // Next state: pop
   if (currState === 'add_member_addToDB') {
-    // TODO
-  }
+    const memberDetails = context.add_member?.new_member_details
 
-  // 🌸 Flow: Add a new Member
-  // State: add_member_addedMember
-  // Inform the user of success and pop
-  if (currState === 'add_member_addedMember') {
-    // TODO
+    if (!memberDetails || !memberDetails.first_name || !memberDetails.role) {
+      return [
+        telegramMessage(
+          'Missing member details while trying to insert into DB',
+          `Something went wrong. Please re-enter the member details.`
+        ),
+        updateSessionQuery(
+          'Missing member details in add_member_addToDB',
+          replaceTopState(session, 'add_member_askForDetails'),
+          context,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    const passwordPrefix = memberDetails.role === 'boss' ? 'owl' : 'bunny'
+    const password = passwordPrefix + memberDetails.first_name
+
+    const memberUIDList = (context.add_member?.member_list || []).map((m) => m.uid)
+    const memberUID = generateUID('M', memberUIDList)
+
+    const newStateStack = popState(session)
+
+    const firstName = memberDetails.first_name
+    const role = memberDetails.role
+    const email = memberDetails.email_id || null
+
+    const fields = {
+      uid: memberUID,
+      first_name: firstName,
+      role,
+      email_id: email,
+      password,
+    }
+
+    // Escape single quotes for safety
+    const escape = (val) => (val ? val.replace(/'/g, `''`) : null)
+
+    return [
+      {
+        json: {
+          route: 'postgresNode',
+          info: 'Inserting new member into DB table team_members',
+          query: `
+          INSERT INTO team_members (email_id, password, uid, first_name, role)
+          VALUES (
+            ${fields.email_id ? `'${escape(fields.email_id)}'` : 'NULL'},
+            '${escape(fields.password)}',
+            '${escape(fields.uid)}',
+            '${escape(fields.first_name)}',
+            '${escape(fields.role)}'
+          );
+        `.trim(),
+        },
+      },
+      telegramMessage(
+        'Informing addition of new team member',
+        `✅ *New Team Member added successfully!*\n\n` +
+          `• 👤 *Name*: ${firstName}\n` +
+          `• 🆔 *UID*: ${memberUID}\n` +
+          `• 🔐 *Password*: \`${password}\`\n\n` +
+          `Please share the details with the member.`
+      ),
+      updateSessionQuery(
+        'New member added to DB. Cleaning up context.',
+        newStateStack,
+        `
+        jsonb_strip_nulls(
+          jsonb_set(
+            coalesce(context_data, '{}'::jsonb),
+            '{add_member}',
+            'null'::jsonb,
+            true
+          )
+        )
+      `,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Delete a Member
@@ -3600,7 +3834,7 @@ function getOtherCommandNextState(input) {
 
 // Parse the User's Input when they have entered details of a task
 // Reply with no colon found if the user has not entered key:value pair format mein input
-function parseTaskDetails(text) {
+function parseKeyValueInput(text) {
   // Split each line
   const lines = text.split('\n')
 
@@ -3630,6 +3864,7 @@ function parseTaskDetails(text) {
   return { success: true, data: taskData }
 }
 
+// Validate the Task Details entered by the user
 function validateTaskDetails(data) {
   if (!data.title) {
     return {
