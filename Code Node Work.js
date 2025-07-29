@@ -3461,8 +3461,8 @@ if (processing_flag == true) {
           'Error: UID missing during deletion',
           popState(session),
           `jsonb_strip_nulls(
-          jsonb_set(coalesce(context_data, '{}'::jsonb), '{delete_member}', 'null'::jsonb, true)
-        )`,
+            jsonb_set(coalesce(context_data, '{}'::jsonb), '{delete_member}', 'null'::jsonb, true)
+          )`,
           true,
           currUserTelegramID
         ),
@@ -3537,9 +3537,35 @@ if (processing_flag == true) {
   // 🌸 Flow: Update a Member's Details
   // State: update_member_started
   // Fetch all the members details
-  // Next state: update_member_selectMember
+  // Next state stack: ..., update_member_selectMember, fetch_members
   if (currState === 'update_member_started') {
-    // TODO
+    const newStateStack = pushState(
+      replaceTopState(session, 'update_member_selectMember'),
+      'fetch_members'
+    )
+
+    const contextDataSQL = `
+      jsonb_set(
+        jsonb_set(
+          coalesce(context_data, '{}'::jsonb),
+          '{update_member}',
+          '{}'::jsonb,
+          true
+        ),
+        '{fetch_members}',
+        jsonb_build_object('caller', 'update_member'),
+        true
+      )`
+
+    return [
+      updateSessionQuery(
+        'Updating a new member - fetching members details',
+        newStateStack,
+        contextDataSQL,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Update a Member's Details
@@ -3547,38 +3573,278 @@ if (processing_flag == true) {
   // Show all the members and ask the user to select one
   // Next state: update_member_askForDetails
   if (currState === 'update_member_selectMember') {
-    // TODO
+    const members = context.update_member?.member_list || []
+
+    // Prepare message
+    const displayLines = members.map((m) => `• 👤 *${m.first_name}* (/${m.uid})`)
+
+    const displayMessage =
+      displayLines.join('\n') + `\n\nPlease click the *UID* of the member you wish to update.`
+
+    const newStateStack = replaceTopState(session, 'update_member_askForDetails')
+
+    return [
+      telegramMessage('Showing members list', displayMessage),
+      updateSessionQuery(
+        'Waiting for UID input to ask for new details',
+        newStateStack,
+        context,
+        false,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Update a Member's Details
   // State: update_member_askForDetails
-  // Ask the user for the new details
-  // Next state: update_member_checkDetails
+  // Ask for new details in key=value format
+  // Next state: update_member_confirmUpdate
   if (currState === 'update_member_askForDetails') {
-    // TODO
+    const userInput = String(currInput).trim().replace('/', '').toLowerCase()
+    const members = context.update_member?.member_list || []
+
+    const selectedMember = members.find((m) => m.uid.toLowerCase() === userInput)
+
+    if (!selectedMember) {
+      const newStateStack = replaceTopState(session, 'update_member_selectMember')
+      return [
+        telegramMessage(
+          'Invalid UID',
+          `🚫 I couldn't find a team member with UID *${userInput}*.` +
+            `\nPlease try again by clicking a valid UID from the list.`
+        ),
+        updateSessionQuery(
+          'Reverting back from update_member_askForDetails to update_member_selectMember',
+          newStateStack,
+          context,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    const message =
+      `You are updating *${capitalize(selectedMember.first_name)}*.\n` +
+      `Please share the updated details in *Key:Value* format.\n\nFor example:\n\n` +
+      `*first_name*: Erika\n` +
+      `*role*: employee\n` +
+      `*email_id*: erika1234@gmail.com\n` +
+      `*password*: new_password\n\n` +
+      `The role can be either *boss* or *employee*\n`
+
+    const contextDataSQL = `
+      jsonb_set(
+        coalesce(context_data, '{}'::jsonb),
+        '{update_member, selected_member_uid}',
+        to_jsonb('${selectedMember.uid}'),
+        true
+      )
+    `.trim()
+
+    const newStateStack = replaceTopState(session, 'update_member_confirmUpdate')
+
+    return [
+      telegramMessage('Enter new member details', message),
+      updateSessionQuery(
+        'Stored selected UID and waiting for new details',
+        newStateStack,
+        contextDataSQL,
+        false,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Update a Member's Details
   // State: update_member_checkDetails
-  // Ask the user for the new details
+  // Check all entered details and validate the input
   // Next state: update_member_updateDB
   if (currState === 'update_member_checkDetails') {
-    // TODO
+    const memberText = String(currInput).trim()
+    const parsed = parseKeyValueInput(memberText)
+
+    if (!parsed.success) {
+      const newStateStack = replaceTopState(session, 'update_member_askForDetails')
+      return [
+        telegramMessage('User entered no colons in update_member_checkDetails', parsed.message),
+        updateSessionQuery(parsed.info, newStateStack, context, true, currUserTelegramID),
+      ]
+    }
+
+    const data = parsed.data
+
+    // Begin validation
+    const allowedKeys = ['first_name', 'role', 'email_id', 'password']
+    const invalidKeys = Object.keys(data).filter((k) => !allowedKeys.includes(k))
+
+    if (invalidKeys.length > 0) {
+      const newStateStack = replaceTopState(session, 'update_member_askForDetails')
+      return [
+        telegramMessage(
+          'User entered unknown fields for update',
+          `Unknown field(s): *${invalidKeys.join(', ')}*.\n\nPlease use only:\n*first_name*, *role*, *email_id*, and *password*.`
+        ),
+        updateSessionQuery(
+          'Invalid keys entered while updating member',
+          newStateStack,
+          context,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    // Validate first_name if present
+    const firstName = data.first_name
+    if (firstName && !/^[a-zA-Z]+$/.test(firstName)) {
+      const newStateStack = replaceTopState(session, 'update_member_askForDetails')
+      return [
+        telegramMessage(
+          'Invalid first_name for update',
+          `The *first_name* must be a single word and only contain letters (A-Z).\n\nYou entered: *${firstName}*\nPlease try again.`
+        ),
+        updateSessionQuery(
+          'Invalid first_name entered during update',
+          newStateStack,
+          context,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    // Validate role if present
+    const role = data.role?.toLowerCase()
+    if (role && role !== 'boss' && role !== 'employee') {
+      const newStateStack = replaceTopState(session, 'update_member_askForDetails')
+      return [
+        telegramMessage(
+          'Invalid role for update',
+          `The *role* must be either *boss* or *employee*.\n\nYou entered: *${role}*\nPlease try again.`
+        ),
+        updateSessionQuery(
+          'Invalid role entered during update',
+          newStateStack,
+          context,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    // Validate email_id if present
+    const email = data.email_id
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      const newStateStack = replaceTopState(session, 'update_member_askForDetails')
+      return [
+        telegramMessage(
+          'Invalid email_id for update',
+          `The *email_id* you entered is not a valid email.\n\nYou entered: *${email}*\nPlease try again.`
+        ),
+        updateSessionQuery(
+          'Invalid email_id entered during update',
+          newStateStack,
+          context,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    // Password: no validation for now
+    const password = data.password
+
+    // Prepare context update SQL
+    const fieldPairs = []
+    if (firstName) fieldPairs.push(`'first_name', '${firstName}'`)
+    if (role) fieldPairs.push(`'role', '${role}'`)
+    if (email) fieldPairs.push(`'email_id', '${email}'`)
+    if (password) fieldPairs.push(`'password', '${password}'`)
+
+    const contextDataSQL = `
+      jsonb_set(
+        coalesce(context_data, '{}'::jsonb),
+        '{update_member,new_member_details}',
+        jsonb_build_object(${fieldPairs.join(', ')}),
+        true
+      )
+    `.trim()
+
+    const newStateStack = replaceTopState(session, 'update_member_updateDB')
+
+    return [
+      updateSessionQuery(
+        'Validated member fields, moving to update_member_updateDB',
+        newStateStack,
+        contextDataSQL,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Update a Member's Details
   // State: update_member_updateDB
-  // Ask the user for the new details
-  // Next state: update_member_updatedMember
+  // Update member in DB, inform user, and pop state
   if (currState === 'update_member_updateDB') {
-    // TODO
-  }
+    const uid = context.update_member?.selected_member_uid
+    const details = context.update_member?.new_member_details
 
-  // 🌸 Flow: Update a Member's Details
-  // State: update_member_updatedMember
-  // Inform the user and pop
-  if (currState === 'update_member_updatedMember') {
-    // TODO
+    const members = context.update_member?.member_list || []
+    const selectedMember = members.find((m) => m.uid.toLowerCase() === uid)
+
+    if (!uid || !details) {
+      // Fail-safe fallback
+      return [
+        telegramMessage(
+          'Missing data for update',
+          `🚫 Could not find member UID or update details in context. Please restart the update flow.`
+        ),
+        updateSessionQuery(
+          'Error: details missing during member updation',
+          popState(session),
+          `jsonb_strip_nulls(
+            jsonb_set(coalesce(context_data, '{}'::jsonb), '{update_member}', 'null'::jsonb, true)
+          )`,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    const fieldsToUpdate = Object.entries(details)
+      .map(([key, val]) => `${key} = ${val === null ? 'NULL' : `'${val}'`}`)
+      .join(', ')
+
+    const sqlUpdate = `
+      UPDATE team_members
+      SET ${fieldsToUpdate}
+      WHERE uid = '${uid}';
+    `.trim()
+
+    return [
+      {
+        json: {
+          route: 'postgresNode',
+          info: `Updating team member's details`,
+          query: sqlUpdate,
+        },
+      },
+      telegramMessage(
+        '✅ Member updated successfully',
+        `The details for ${capitalize(selectedMember.first_name)}` +
+          ` have been updated successfully.`
+      ),
+      updateSessionQuery(
+        'Updated Member. Popping now',
+        popState(session),
+        `jsonb_strip_nulls(
+          jsonb_set(coalesce(context_data, '{}'::jsonb), '{update_member}', 'null'::jsonb, true)
+        )`,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: View All Members
@@ -3586,14 +3852,96 @@ if (processing_flag == true) {
   // Fetch all the details from the database
   // Next state stack: ..., view_members_showDetails, fetch_assignments, fetch_members
   if (currState === 'view_members_started') {
-    // TODO
+    const newStateStack = pushState(
+      pushState(replaceTopState(session, 'view_members_showDetails'), 'fetch_assignments'),
+      'fetch_members'
+    )
+
+    const contextDataSQL = `
+      jsonb_set(
+        jsonb_set(
+          jsonb_set(
+            coalesce(context_data, '{}'::jsonb),
+            '{view_members}',
+            '{}'::jsonb,
+            true
+          ),
+          '{fetch_assignments}',
+          jsonb_build_object('caller', 'view_members'),
+          true
+        ),
+        '{fetch_members}',
+        jsonb_build_object('caller', 'view_members'),
+        true
+      )`
+
+    return [
+      updateSessionQuery(
+        'View all team members - fetching assignment and member details',
+        newStateStack,
+        contextDataSQL,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: View All Members
   // State: view_members_showDetails
   // Show all the member's details as well as number of active assignments, and pop
   if (currState === 'view_members_showDetails') {
-    // TODO
+    const members = context.view_members?.member_list || []
+    const assignments = context.view_members?.assignment_list || []
+
+    if (members.length === 0) {
+      return [
+        telegramMessage('No members found', `🚫 There are no team members in the system.`),
+        updateSessionQuery(
+          'No members found while viewing',
+          popState(session),
+          `jsonb_strip_nulls(
+            jsonb_set(coalesce(context_data, '{}'::jsonb), '{view_members}', 'null'::jsonb, true)
+          )`,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    // Count active assignments per member
+    const activeAssignmentCounts = {} // uid -> count
+    for (const a of assignments) {
+      if (['pending', 'review'].includes(a.status) && a.member_uid) {
+        activeAssignmentCounts[a.member_uid] = (activeAssignmentCounts[a.member_uid] || 0) + 1
+      }
+    }
+
+    // Format details for each member
+    const memberLines = members.map((m, idx) => {
+      const count = activeAssignmentCounts[m.uid] || 0
+      return (
+        `*${idx + 1}. ${capitalize(m.first_name)}* (${m.uid})\n` +
+        `• Role: *${m.role}*\n` +
+        `• Email: \`${m.email_id}\`\n` +
+        `• Password: \`${m.password}\`\n` +
+        `• *${count}* Active Assignments`
+      )
+    })
+
+    const message = memberLines.join('\n\n')
+
+    return [
+      telegramMessage('📋 Team Members', message),
+      updateSessionQuery(
+        'Shown all member details',
+        popState(session),
+        `jsonb_strip_nulls(
+          jsonb_set(coalesce(context_data, '{}'::jsonb), '{view_members}', 'null'::jsonb, true)
+        )`,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Change Password
@@ -3601,7 +3949,33 @@ if (processing_flag == true) {
   // Fetch all the members details
   // Next state stack: ..., change_password_askOldPassword, fetch_members
   if (currState === 'change_password_started') {
-    // TODO
+    const newStateStack = pushState(
+      replaceTopState(session, 'change_password_askOldPassword'),
+      'fetch_members'
+    )
+
+    const contextDataSQL = `
+      jsonb_set(
+        jsonb_set(
+          coalesce(context_data, '{}'::jsonb),
+          '{change_password}',
+          '{}'::jsonb,
+          true
+        ),
+        '{fetch_members}',
+        jsonb_build_object('caller', 'change_password'),
+        true
+      )`
+
+    return [
+      updateSessionQuery(
+        'Changing Password - fetching members details',
+        newStateStack,
+        contextDataSQL,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Change Password
@@ -3609,38 +3983,111 @@ if (processing_flag == true) {
   // Ask the user for their old password for security. Skip if role is boss.
   // Next state: change_password_checkOldPassword
   if (currState === 'change_password_askOldPassword') {
-    // TODO
+    const nextStateStack = replaceTopState(session, `change_password_checkOldPassword`)
+    return [
+      telegramMessage(`Asking user for older password`, `Please enter your current password`),
+      updateSessionQuery(
+        `Change Password flow: asking for current password`,
+        nextStateStack,
+        context,
+        false,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Change Password
   // State: change_password_checkOldPassword
   // Check if entered old password is correct
-  // Next state: change_password_askNewPassword
-  if (currState === 'change_password_checkOldPassword') {
-    // TODO
-  }
-
-  // 🌸 Flow: Change Password
-  // State: change_password_askNewPassword
-  // Ask the user for the new password
   // Next state: change_password_updateDB
-  if (currState === 'change_password_askNewPassword') {
-    // TODO
+  if (currState === 'change_password_checkOldPassword') {
+    const enteredPassword = String(currInput).trim()
+    const members = context.change_password?.member_list || []
+
+    const currentMember = members.find((m) => m.uid === currMemberID)
+
+    if (!currentMember) {
+      return [
+        telegramMessage(
+          '❌ Error',
+          `Could not find your member profile in the system. Please contact a boss.`
+        ),
+        updateSessionQuery(
+          'Change Password: failed to identify user in member_list',
+          popState(session),
+          `jsonb_strip_nulls(
+            jsonb_set(coalesce(context_data, '{}'::jsonb), '{change_password}', 'null'::jsonb, true)
+          )`,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    if (enteredPassword !== currentMember.password) {
+      return [
+        telegramMessage(
+          '❌ Incorrect Password',
+          `The password you entered does not match our records.\nExiting.`
+        ),
+        updateSessionQuery(
+          'Change Password: incorrect password entered',
+          popState(session),
+          `jsonb_strip_nulls(
+            jsonb_set(coalesce(context_data, '{}'::jsonb), '{change_password}', 'null'::jsonb, true)
+          )`,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    const newStateStack = replaceTopState(session, 'change_password_updateDB')
+
+    return [
+      telegramMessage('✅ Password verified', `Please enter your *new password*.`),
+      updateSessionQuery(
+        'Old password verified, proceeding to ask new password',
+        newStateStack,
+        context,
+        false,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Change Password
   // State: change_password_updateDB
   // Update the password in the database
-  // Next state: change_password_passwordChanged
-  if (currState === 'change_password_updateDB') {
-    // TODO
-  }
-
-  // 🌸 Flow: Change Password
-  // State: change_password_passwordChanged
   // Inform the user and pop
-  if (currState === 'change_password_passwordChanged') {
-    // TODO
+  if (currState === 'change_password_updateDB') {
+    const newPassword = String(currInput).trim()
+
+    const sqlUpdate = `
+      UPDATE team_members
+      SET password = '${newPassword}'
+      WHERE uid = '${currMemberID}';
+    `.trim()
+
+    return [
+      {
+        json: {
+          route: 'postgresNode',
+          info: `Updating member password`,
+          query: sqlUpdate,
+        },
+      },
+      telegramMessage('🔒 Password Changed', `✅ Done! Your password has been updated securely.`),
+      updateSessionQuery(
+        'Password updated, cleaning up and popping state',
+        popState(session),
+        `jsonb_strip_nulls(
+          jsonb_set(coalesce(context_data, '{}'::jsonb), '{change_password}', 'null'::jsonb, true)
+        )`,
+        true,
+        currUserTelegramID
+      ),
+    ]
   }
 
   // 🌸 Flow: Last Intention Ended
