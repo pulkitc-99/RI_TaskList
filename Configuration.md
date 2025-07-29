@@ -32,3 +32,13 @@ update_member_askForDetails
 update_member_checkDetails
 update_member_updateDB
 
+FLOW: View all members' details
+view_members_started
+view_members_showDetails
+
+FLOW: Change Password
+change_password_started
+change_password_askOldPassword
+change_password_checkOldPassword
+change_password_askNewPassword
+change_password_updateDB
