@@ -1,8 +1,8 @@
-const currUserID = $('Trigger upon receiving telegram message').first().json.message.from.id // this means telegram ID
-const sessionData = $('Updated Session').first().json;
+const currUserTelegramID = $('Trigger upon receiving telegram message').first().json.message.from.id
+const sessionData = $('Updated Session').first().json
 
-// First we check if the track_session table returned empty data for the given telegram_id which means the user is new
-// If it is empty then create a new row for them, and then proceed to state based logic
+// First we check if the track_session table returned empty data for the given telegram_id
+// If yes, create a new row, and then proceed to logging in and state based logic
 if (!sessionData || Object.keys(sessionData).length === 0 || !sessionData.telegram_id) {
   return [
     {
@@ -10,36 +10,276 @@ if (!sessionData || Object.keys(sessionData).length === 0 || !sessionData.telegr
       json: {
         route: 'postgresNode',
         info: 'Inserting new row for new user into DB table track_session',
-        query: String(`INSERT INTO track_session (telegram_id) VALUES ('${currUserID}');`.trim()),
+        query: String(
+          `INSERT INTO track_session (telegram_id) VALUES ('${currUserTelegramID}');`.trim()
+        ),
       },
     },
     // Inform the user that the task is added and ask for optional assignments
     telegramMessage(
       'Informing that this user is new and adding their row',
-      `Welcome! You are now registered. Please continue.`
+      `You are now registered. Please continue.`
     ),
+
     updateSessionQuery(
       'Ensure state is logged_out and context_data is empty',
       ['logged_out'],
-      {}, // this will stringify to `'{}'::jsonb`
+      {},
       true,
-      currUserID
+      currUserTelegramID
     ),
   ]
 }
 
 // 📦 Extract commonly used session & user details from previous nodes
 const session = $('Updated Session').first().json.state
-const context = $('Updated Session').first().json.context_data || {}
+// Extract current state from the state stack
+const currState = peekState(session)
+const context = $('Updated Session').first().json.context_data
 const processing_flag = $('Updated Session').first().json.processing_flag
 const currInput = $('Trigger upon receiving telegram message').first().json.message.text
 
+// Check if the user is logged in
+// If not, we execute the login flow
+if ($('Updated Session').first().json.muid == null && processing_flag == true) {
+  // State: logged_out
+  // This is also the state when a new telegram_id has been entered
+  // We simply go to asking for first name state
+  if (currState === 'logged_out') {
+    return [
+      updateSessionQuery(
+        'Starting new login state',
+        ['login_askForFirstName'],
+        {},
+        true,
+        currUserTelegramID
+      ),
+    ]
+  }
+
+  // State: login_askForFirstName
+  // Next state: login_validateName
+  // We also fetch all members' details at this state
+  if (currState === 'login_askForFirstName') {
+    const contextDataSQL = `
+      jsonb_set(
+        jsonb_set(
+          coalesce(context_data, '{}'::jsonb),
+          '{login}',
+          '{}'::jsonb,
+          true
+        ),
+        '{fetch_members}',
+        jsonb_build_object('caller', 'login'),
+        true
+      )
+    `
+
+    const newStateStack = pushState(replaceTopState(session, `login_validateName`), `fetch_members`)
+    return [
+      telegramMessage(
+        `Ask user for name`,
+        `Welcome to RI Task List Bot\nPlease enter your first name to login.`
+      ),
+      updateSessionQuery(
+        `Wait for name input`,
+        newStateStack,
+        contextDataSQL,
+        false,
+        currUserTelegramID
+      ),
+    ]
+  }
+
+  // State: login_validateName
+  // Next state: login_performLogin (or) login_validateUID if name is not unique
+  if (currState === `login_validateName`) {
+    const userInput = currInput.trim().toLowerCase()
+    const members = context.login.member_list
+
+    // Filter matches by first name
+    const matched = members.filter((m) => m.first_name.toLowerCase() === userInput)
+
+    // If multiple matches found for the given first name, ask for UID
+    if (matched.length > 1) {
+      const contextDataSQL = `
+      jsonb_set(
+        jsonb_set(
+          coalesce(context_data, '{}'::jsonb),
+          '{login,entered_name}',
+          '"${userInput}"'::jsonb,
+          true
+        ),
+        '{login,ambiguous_name_matches}',
+        '${JSON.stringify(matched)}'::jsonb,
+        true
+      )
+    `
+
+      return [
+        telegramMessage(
+          'Multiple name matches',
+          `Multiple members found with the name "${userInput}".` +
+            `\nPlease reply with your UID.\n\nor click /cancel to exit.`
+        ),
+        updateSessionQuery(
+          'Ask for UID due to ambiguous name',
+          ['login_validateUID'],
+          contextDataSQL,
+          false,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    // Only one or zero match — proceed with login attempt later
+    // (If no match, we will still pretend and fail only after password)
+    const selectedUID = matched[0]?.uid || null
+
+    let contextDataSQL = `
+    jsonb_set(
+      coalesce(context_data, '{}'::jsonb),
+      '{login,entered_name}',
+      '"${userInput}"'::jsonb,
+      true
+    )`
+
+    if (selectedUID) {
+      contextDataSQL = `
+        jsonb_set(
+          ${contextDataSQL},
+          '{login,selected_member_uid}',
+          '"${selectedUID}"'::jsonb,
+          true
+        )`
+    }
+
+    return [
+      telegramMessage(
+        'Request password',
+        `Hello ${capitalize(userInput)}.\nPlease enter your password:`
+      ),
+      updateSessionQuery(
+        'Ask for password and perform login next',
+        ['login_performLogin'],
+        contextDataSQL,
+        false,
+        currUserTelegramID
+      ),
+    ]
+  }
+
+  // State: login_validateUID
+  // Save the UID since multiple members with given name were found and ask for password
+  // Next state: login_performLogin
+  if (currState === 'login_validateUID') {
+    const userInput = currInput.trim().toLowerCase()
+
+    if (userInput.replace('/', '') === 'cancel') {
+      return [
+        telegramMessage(
+          'Cancel login flow',
+          `Session Terminated.\nSend a message to try logging in again.`
+        ),
+        updateSessionQuery(
+          'User cancelled login flow',
+          ['logged_out'],
+          `'{}'::jsonb`,
+          false,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    const matches = context.login.ambiguous_name_matches
+    const selected = matches.find((m) => m.uid.toLowerCase() === userInput)
+
+    if (!selected) {
+      return [
+        telegramMessage(
+          'Invalid UID entered',
+          `No matching UID found.\nPlease check and enter again.\n\nor click /cancel to exit.`
+        ),
+      ]
+    }
+
+    const contextDataSQL = `
+      jsonb_set(
+        coalesce(context_data, '{}'::jsonb),
+        '{login,selected_member_uid}',
+        '"${selected.uid}"'::jsonb,
+        true
+      )`
+
+    return [
+      telegramMessage(
+        'Valid UID entered',
+        `Thanks ${capitalize(selected.first_name)}.\nPlease enter your password:`
+      ),
+      updateSessionQuery(
+        'Proceeding to check password and log in after UID confirmation',
+        ['login_performLogin'],
+        contextDataSQL,
+        false,
+        currUserTelegramID
+      ),
+    ]
+  }
+
+  // State: login_performLogin
+  // Next state: new_session
+  // State: login_performLogin
+  // Validate password and complete login
+  if (currState === 'login_performLogin') {
+    const userPassword = currInput.trim()
+    const members = context.login.member_list
+    const uid = context.login.selected_member_uid
+
+    const matched = members.find((m) => m.uid === uid)
+    const failed = !matched || matched.password !== userPassword
+
+    if (failed) {
+      return [
+        telegramMessage(
+          `Login failed`,
+          `Login failed. Invalid username or password.\nPlease try again.`
+        ),
+        updateSessionQuery(
+          'Go back to logged_out after failed login',
+          ['logged_out'],
+          `'{}'::jsonb`,
+          true,
+          currUserTelegramID
+        ),
+      ]
+    }
+
+    return [
+      telegramMessage('Login successful', `Logged in successfully`),
+      {
+        json: {
+          route: 'updateSession',
+          info: 'Update session to reflect logged-in user',
+          query: `
+            UPDATE track_session
+            SET 
+              muid = '${matched.uid}',
+              state = '["new_session"]'::jsonb,
+              context_data = '{}'::jsonb,
+              processing_flag = true,
+              last_updated = NOW()
+            WHERE telegram_id = '${currUserTelegramID}';
+            `.trim(),
+        },
+      },
+    ]
+  }
+}
+
+// Once user exists and is logged in, continue with the code's flow
 const currUserName = $('Get User Details').first().json.first_name
 const currRole = $('Get User Details').first().json.role
 const currMemberID = $('Get User Details').first().json.uid // this means 5 digit member ID
-
-// Extract current state from the state stack
-let currState = peekState(session)
 
 if (processing_flag == true) {
   // If the user gave cancel command then quit the flow and inform the user
@@ -56,6 +296,78 @@ if (processing_flag == true) {
 
   // 🌸 Start of the divine state based routing
 
+  // Flow: Google Sheets Input
+  // State: googleSheet_input_started
+  if (currState === 'googleSheet_input_started') {
+    const newStateStack = ['googleSheet_input_dataFetched']
+    const contextDataSQL = `
+      jsonb_set(
+        jsonb_set(
+          jsonb_set(
+            jsonb_set(
+              jsonb_set(
+                coalesce(context_data, '{}'::jsonb),
+                '{gSheetInput}',
+                '{}'::jsonb,
+                true
+              ),
+              '{fetch_assignments}',
+              jsonb_build_object('caller', 'gSheetInput'),
+              true
+            ),
+            '{fetch_clients}',
+            jsonb_build_object('caller', 'gSheetInput'),
+            true
+          ),
+          '{fetch_tasks}',
+          jsonb_build_object('caller', 'gSheetInput'),
+          true
+        ),
+        '{fetch_members}',
+        jsonb_build_object('caller', 'gSheetInput'),
+        true
+      )
+    `
+
+    return [
+      {
+        json: {
+          route: 'gSheetInput',
+        },
+      },
+      updateSessionQuery(
+        'Update state to data fetched for google sheet input',
+        newStateStack,
+        contextDataSQL,
+        true
+      ),
+    ]
+  }
+
+  // Flow: Google Sheets Input
+  if (currState === 'googleSheet_input_dataFetched') {
+    // TODO
+  }
+
+  // Flow: Google Sheets Input
+  if (currState === 'googleSheet_input_finished') {
+    // TODO
+  }
+
+  // Flow: Google Sheets Output
+  if (currState === 'googleSheet_output_started') {
+    // TODO
+  }
+
+  // Flow: Google Sheets Output
+  if (currState === 'googleSheet_output_dataFetched') {
+    // TODO
+  }
+
+  if (currState === 'googleSheet_output_finished') {
+    // TODO
+  }
+
   // State: new_session
   // 🌸 If a new session has started, greet the user and ask them what they wish to do.
   // Next State: session_started
@@ -71,7 +383,8 @@ if (processing_flag == true) {
         'change state from new_session to session_started',
         newStateStack,
         `'{}'::jsonb`,
-        false
+        false,
+        currUserTelegramID
       ),
     ]
   }
@@ -87,13 +400,15 @@ if (processing_flag == true) {
       return [
         telegramMessage(
           `Informing user of invalid command`,
-          `Hmm... I couldnt understand what you want.\nPlease choose from the options provided.\nLet's try again.`
+          `Hmm... I couldnt understand what you want.\n` +
+            `Please choose from the options provided.`
         ),
         updateSessionQuery(
           'revert from session_started back to new_session because of invalid command',
           newStateStack,
           `'{}'::jsonb`,
-          true
+          true,
+          currUserTelegramID
         ),
       ]
     } else if (nextState === 'unauthorized') {
@@ -101,13 +416,15 @@ if (processing_flag == true) {
       return [
         telegramMessage(
           `Informing user of they are not authorized`,
-          `Hmm...\nIt seems you are not authorized to do that.\nPlease choose from the options provided.\nLet's try again.`
+          `Hmm...\nIt seems you are not authorized to do that.\n` +
+            `Please choose from the options provided.`
         ),
         updateSessionQuery(
           `revert from session_started back to new_session because of invalid command`,
           newStateStack,
           `'{}'::jsonb`,
-          true
+          true,
+          currUserTelegramID
         ),
       ]
     } else {
@@ -117,7 +434,8 @@ if (processing_flag == true) {
           `Updating state to push ${nextState} on the stack`,
           newStateStack,
           `'{}'::jsonb`,
-          true
+          true,
+          currUserTelegramID
         ),
       ]
     }
@@ -2479,7 +2797,8 @@ if (processing_flag == true) {
       `viewM\nView all team members\n` +
       `\n\n🗃 Miscellaneous\n` +
       `sendT\nSend a team member's tasks to them\n` +
-      `backT\nBack up all the current task list data\n`
+      `backT\nBack up all the current task list data\n` +
+      `/logout\nLog out of your RI Task Bot Account\n`
 
     return [
       telegramMessage('Present list of other commands to user', message),
@@ -2487,7 +2806,8 @@ if (processing_flag == true) {
         `State changes from other_started to check_other_command. We check what "other" command the user enters.`,
         newStateStack,
         context,
-        false
+        false,
+        currUserTelegramID
       ),
     ]
   }
@@ -2508,7 +2828,8 @@ if (processing_flag == true) {
           'Reverting back to other_started because of invalid command',
           session,
           context,
-          false
+          false,
+          currUserTelegramID
         ),
       ]
     } else {
@@ -2518,7 +2839,8 @@ if (processing_flag == true) {
           `Updating state to push ${nextState} on top of session_ongoing`,
           newStateStack,
           context,
-          true
+          true,
+          currUserTelegramID
         ),
       ]
     }
@@ -2691,6 +3013,193 @@ if (processing_flag == true) {
     ]
   }
 
+  // 🌸 Flow: Add a new Member
+  // State: add_member_started
+  // Starting to add new member. Fetch all current members' details for reference.
+  // Next state stack: ..., add_member_askForDetails, fetch_members
+  if (currState === 'add_member_started') {
+    // TODO
+  }
+
+  // 🌸 Flow: Add a new Member
+  // State: add_member_askForDetails
+  // Ask the user for all the relevant details of the new team member
+  // Next state: add_member_checkDetails
+  if (currState === 'add_member_askForDetails') {
+    // TODO
+  }
+
+  // 🌸 Flow: Add a new Member
+  // State: add_member_checkDetails
+  // Check all entered details and validate the input
+  // Next state: add_member_addToDB
+  if (currState === 'add_member_checkDetails') {
+    // TODO
+  }
+
+  // 🌸 Flow: Add a new Member
+  // State: add_member_addToDB
+  // Add the new member to the database
+  // Next state: add_member_addedMember
+  if (currState === 'add_member_addToDB') {
+    // TODO
+  }
+
+  // 🌸 Flow: Add a new Member
+  // State: add_member_addedMember
+  // Inform the user of success and pop
+  if (currState === 'add_member_addedMember') {
+    // TODO
+  }
+
+  // 🌸 Flow: Delete a Member
+  // State: delete_member_started
+  // Fetch all the task and members details
+  // Next state: delete_member_selectMember
+  if (currState === 'delete_member_started') {
+    // TODO
+  }
+
+  // 🌸 Flow: Delete a Member
+  // State: delete_member_selectMember
+  // Show the list of employees and ask whom to delete
+  // Next state: delete_member_confirmDeletion
+  if (currState === 'delete_member_selectMember') {
+    // TODO
+  }
+
+  // 🌸 Flow: Delete a Member
+  // State: delete_member_confirmDeletion
+  // Ask for confirmation and tell about active tasks
+  // Next state: delete_member_performDeletion
+  if (currState === 'delete_member_confirmDeletion') {
+    // TODO
+  }
+
+  // 🌸 Flow: Delete a Member
+  // State: delete_member_performDeletion
+  // Delete the member from the database and mark all their assignments as scrapped
+  // Next state: delete_member_deletedMember
+  if (currState === 'delete_member_performDeletion') {
+    // TODO
+  }
+
+  // 🌸 Flow: Delete a Member
+  // State: delete_member_deletedMember
+  // Inform the user and pop
+  if (currState === 'delete_member_deletedMember') {
+    // TODO
+  }
+
+  // 🌸 Flow: Update a Member's Details
+  // State: update_member_started
+  // Fetch all the members details
+  // Next state: update_member_selectMember
+  if (currState === 'update_member_started') {
+    // TODO
+  }
+
+  // 🌸 Flow: Update a Member's Details
+  // State: update_member_selectMember
+  // Show all the members and ask the user to select one
+  // Next state: update_member_askForDetails
+  if (currState === 'update_member_selectMember') {
+    // TODO
+  }
+
+  // 🌸 Flow: Update a Member's Details
+  // State: update_member_askForDetails
+  // Ask the user for the new details
+  // Next state: update_member_checkDetails
+  if (currState === 'update_member_askForDetails') {
+    // TODO
+  }
+
+  // 🌸 Flow: Update a Member's Details
+  // State: update_member_checkDetails
+  // Ask the user for the new details
+  // Next state: update_member_updateDB
+  if (currState === 'update_member_checkDetails') {
+    // TODO
+  }
+
+  // 🌸 Flow: Update a Member's Details
+  // State: update_member_updateDB
+  // Ask the user for the new details
+  // Next state: update_member_updatedMember
+  if (currState === 'update_member_updateDB') {
+    // TODO
+  }
+
+  // 🌸 Flow: Update a Member's Details
+  // State: update_member_updatedMember
+  // Inform the user and pop
+  if (currState === 'update_member_updatedMember') {
+    // TODO
+  }
+
+  // 🌸 Flow: View All Members
+  // State: view_members_started
+  // Fetch all the details from the database
+  // Next state stack: ..., view_members_showDetails, fetch_assignments, fetch_members
+  if (currState === 'view_members_started') {
+    // TODO
+  }
+
+  // 🌸 Flow: View All Members
+  // State: view_members_showDetails
+  // Show all the member's details as well as number of active assignments, and pop
+  if (currState === 'view_members_showDetails') {
+    // TODO
+  }
+
+  // 🌸 Flow: Change Password
+  // State: change_password_started
+  // Fetch all the members details
+  // Next state stack: ..., change_password_askOldPassword, fetch_members
+  if (currState === 'change_password_started') {
+    // TODO
+  }
+
+  // 🌸 Flow: Change Password
+  // State: change_password_askOldPassword
+  // Ask the user for their old password for security. Skip if role is boss.
+  // Next state: change_password_checkOldPassword
+  if (currState === 'change_password_askOldPassword') {
+    // TODO
+  }
+
+  // 🌸 Flow: Change Password
+  // State: change_password_checkOldPassword
+  // Check if entered old password is correct
+  // Next state: change_password_askNewPassword
+  if (currState === 'change_password_checkOldPassword') {
+    // TODO
+  }
+
+  // 🌸 Flow: Change Password
+  // State: change_password_askNewPassword
+  // Ask the user for the new password
+  // Next state: change_password_updateDB
+  if (currState === 'change_password_askNewPassword') {
+    // TODO
+  }
+
+  // 🌸 Flow: Change Password
+  // State: change_password_updateDB
+  // Update the password in the database
+  // Next state: change_password_passwordChanged
+  if (currState === 'change_password_updateDB') {
+    // TODO
+  }
+
+  // 🌸 Flow: Change Password
+  // State: change_password_passwordChanged
+  // Inform the user and pop
+  if (currState === 'change_password_passwordChanged') {
+    // TODO
+  }
+
   // 🌸 Flow: Last Intention Ended
   // State: session_ongoing
   // Ask the user if they would like to do anything else
@@ -2764,7 +3273,7 @@ if (processing_flag == true) {
   }
 
   // 🌸 Flow: Login/Logout
-  // State: 
+  // State:
 
   // 🌸 Subflow: fetching all clients details from the database
   // State: fetch_clients
@@ -2854,12 +3363,12 @@ if (processing_flag == true) {
     ]
   }
 
-  // 🌸 Subflow: fetching all members details from the database
+  // 🌸 Subflow: fetching all members details from the database for the specific caller
   // State: fetch_members
   // Pop the stack after this is complete
   if (currState === 'fetch_members') {
     const newStateStack = popState(session)
-    const caller = context.fetch_members?.caller
+    const caller = context.fetch_members.caller
 
     return [
       updateSessionQuery(
@@ -2878,11 +3387,9 @@ if (processing_flag == true) {
                       json_build_object(
                         'uid', uid,
                         'first_name', first_name,
-                        'team', team,
-                        'email_id', email_id,
-                        'telegram_id', telegram_id,
-                        'communication_preference', communication_preference,
-                        'role', role
+                        'password', password,
+                        'role', role,
+                        'email_id', email_id
                       )
                     )
                     FROM team_members
@@ -2898,7 +3405,8 @@ if (processing_flag == true) {
           )
         )
         `,
-        true
+        true,
+        currUserTelegramID
       ),
     ]
   }
@@ -2925,7 +3433,6 @@ if (processing_flag == true) {
                   (
                     SELECT json_agg(
                       json_build_object(
-                        'due_date', due_date,
                         'task_uid', task_uid,
                         'member_uid', member_uid,
                         'resp', resp,
@@ -2933,7 +3440,6 @@ if (processing_flag == true) {
                         'status', status,
                         'assigned_by', assigned_by,
                         'assigned_at', assigned_at,
-                        'priority', priority
                       )
                     )
                     FROM task_assignments
@@ -2951,6 +3457,33 @@ if (processing_flag == true) {
         `,
         true
       ),
+    ]
+  }
+
+  // Flow: Logging out
+  // Occurs when the user selects log out command from the Other menu
+  if (currState === 'log_out') {
+    return [
+      telegramMessage(
+        'Logged out',
+        `You've been successfully logged out. Send a message to begin again.`
+      ),
+      {
+        json: {
+          route: 'updateSession',
+          info: 'Update session to reflect logged-in user',
+          query: `
+            UPDATE track_session
+            SET 
+              muid = NULL,
+              state = '["logged_out"]'::jsonb,
+              context_data = '{}'::jsonb,
+              processing_flag = false,
+              last_updated = NOW()
+            WHERE telegram_id = '${currUserTelegramID}';
+            `.trim(),
+        },
+      },
     ]
   }
 
@@ -3056,6 +3589,7 @@ function getOtherCommandNextState(input) {
     '/sendT': 'view_members_started',
     '/genR': 'generate_report_started',
     '/backT': 'backup_taskList_started',
+    '/logout': 'log_out',
   }
 
   // const key = String(input).trim().toLowerCase()
@@ -3400,7 +3934,7 @@ function updateSessionQuery(
       info: updateInfo,
       query: `
         UPDATE track_session
-        SET 
+        SET
           state = '${JSON.stringify(nextStateStack)}'::jsonb,
           ${contextUpdateClause},
           processing_flag = ${nextProcessingFlag},
@@ -3501,8 +4035,8 @@ function renderTasksView({ clients, tasks, assignments }) {
 }
 
 // Return correct value for SQL field and escape single quotes
-function ess(value) {
-  if (value == null) return null
-  if (typeof value !== 'string') return `'${value}'`
-  return `'${value.replace(/'/g, "''")}'`
-}
+// function ess(value) {
+//   if (value == null) return null
+//   if (typeof value !== 'string') return `'${value}'`
+//   return `'${value.replace(/'/g, "''")}'`
+// }
